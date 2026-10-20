@@ -1,0 +1,141 @@
+#!/bin/bash
+# Pulse — statusline renderer.
+#
+# Claude Code runs this on every redraw with the statusline JSON on stdin.
+# Budget: ~20 ms. One jq read of a small state file. No transcript, no network.
+set -u
+export PATH="/usr/bin:/bin:$PATH"
+PULSE_HOME="${PULSE_HOME:-$HOME/.claude/pulse}"
+
+input=$(cat)
+IFS=$'\x1f' read -r sid cost dur model ctx over < <(printf '%s' "$input" | jq -r '
+  [ (.session_id // ""),
+    (.cost.total_cost_usd // 0),
+    (.cost.total_duration_ms // 0),
+    (.model.display_name // ""),
+    (.context_window.used_percentage // ""),
+    (.exceeds_200k_tokens // false) ] | map(tostring) | join("")')
+
+# --- colours (256-colour, matches the plan's palette) -----------------------
+R=$'\e[0m'; B=$'\e[1m'
+ACC=$'\e[38;5;141m'   # iris — the fill
+MUTE=$'\e[38;5;245m'  # track, labels
+GOOD=$'\e[38;5;78m'
+WARN=$'\e[38;5;214m'
+CRIT=$'\e[38;5;203m'
+
+# --- right-hand cluster: time · cost · model, straight from the statusline input
+secs=$(( ${dur%.*} / 1000 ))
+if   [ "$secs" -ge 3600 ]; then dur_s="$((secs / 3600))h $(( (secs % 3600) / 60 ))m"
+elif [ "$secs" -ge 60 ];   then dur_s="$((secs / 60))m"
+else                            dur_s="${secs}s"; fi
+cost_s=$(printf '%.2f' "$cost")
+right="${MUTE}⏱ ${dur_s} · \$${cost_s}"
+[ -n "$model" ] && right="$right · $model"
+ctx_i=${ctx%.*}
+if [ "$over" = "true" ]; then right="$right ${WARN}▮ over 200k"
+elif [ -n "$ctx_i" ] && [ "$ctx_i" -ge 80 ] 2>/dev/null; then right="$right ${WARN}▮ ctx ${ctx_i}%"; fi
+right="$right${R}"
+
+# --- share what only the statusline knows (real cost, model, context) with the dashboard.
+# Written only when the value changes, so this costs nothing on most redraws.
+if [ -n "$sid" ] && [ -d "$PULSE_HOME/state" ]; then
+  live="$PULSE_HOME/state/$sid.live"
+  new=$(printf '{"cost_usd":%s,"duration_ms":%s,"model":"%s","ctx_pct":%s}' "$cost" "${dur%.*}" "${model//\"/}" "${ctx_i:-null}")
+  if [ "$(cat "$live" 2>/dev/null)" != "$new" ]; then
+    printf '%s' "$new" > "$live.tmp" && mv -f "$live.tmp" "$live"
+  fi
+fi
+
+# --- no state yet: say so, keep the useful numbers -------------------------
+state="$PULSE_HOME/state/$sid.json"
+if [ -z "$sid" ] || [ ! -f "$state" ]; then
+  printf '%s◌ reading the chat…%s   %s\n' "$MUTE" "$R" "$right"
+  printf '%spulse · first update after Claude'"'"'s next reply%s\n' "$MUTE" "$R"
+  exit 0
+fi
+
+# --- one read of the state file --------------------------------------------
+IFS=$'\x1f' read -r overall source goal now hstate hdetail done total ip edits commits tests_pass mode phases scope subagents ctx_est behind < <(jq -r '
+  def clip(n): gsub("[\t\n\r]+"; " ") | if length > n then .[0:n-1] + "…" else . end;
+  [ (.overall // 0),
+    (.source // "heuristic"),
+    ((.goal // .title // .last_prompt // .project // "") | clip(40)),
+    ((.now // "") | clip(48)),
+    (.health.state // "active"),
+    ((.health.detail // "") | clip(40)),
+    ([ .checklist[]? | select(.done) ] | length),
+    (.checklist | length),
+    ([ .checklist[]? | select(.status == "in_progress") ] | length),
+    (.stats.edits // 0), (.stats.commits // 0), (.stats.tests_pass // 0),
+    (.mode // "build"),
+    ([ .phases[]? | "\(.name | clip(16))|\(.pct)" ] | join(";")),
+    (if .scope_changed then "1" else "0" end),
+    (.subagents // 0),
+    (.ctx_pct_est // ""),
+    (if .plan_behind then "1" else "0" end)
+  ] | map(tostring) | join("")' "$state" 2>/dev/null)
+[ -z "${overall:-}" ] && overall=0
+
+# sub-agents, and a context estimate when the statusline input gave nothing exact
+[ "${subagents:-0}" -gt 0 ] 2>/dev/null && right="${right%$R} ${MUTE}· ⚙ ${subagents}${R}"
+if [ -z "$ctx_i" ] && [ "$over" != "true" ] && [ -n "${ctx_est:-}" ] && [ "$ctx_est" -ge 80 ] 2>/dev/null; then
+  right="${right%$R} ${WARN}▮ ctx ≈${ctx_est}%${R}"
+fi
+
+# --- the bar: ten cells, ▰ filled ▱ empty ----------------------------------
+filled=$(( (overall + 5) / 10 )); [ "$filled" -gt 10 ] && filled=10
+bar=""
+for ((i = 0; i < 10; i++)); do
+  if [ "$i" -lt "$filled" ]; then bar+="${ACC}▰"; else bar+="${MUTE}▱"; fi
+done
+bar="$bar$R"
+
+# --- health prefix ----------------------------------------------------------
+case "$hstate" in
+  needs_you) badge="${WARN}⏸ needs you${R}" ;;
+  done)      badge="${GOOD}✓ done${R}" ;;
+  looping)   badge="${CRIT}↻ looping${R}" ;;
+  context)   badge="${WARN}▮ context${R}" ;;
+  *)         badge="${ACC}⚡${R}" ;;
+esac
+
+# --- line 1: badge · % · bar · goal · right cluster -------------------------
+if [ "$mode" = "explore" ] || [ "$mode" = "conversation" ]; then
+  # nothing is being built yet — a percentage would be a lie
+  [ "$mode" = "explore" ] && lbl="exploring" || lbl="chatting"
+  printf '%s %s%s%s %s  %s   %s\n' "$badge" "$MUTE" "$lbl" "$R" "$bar" "$goal" "$right"
+else
+  printf '%s %s%3d%%%s %s  %s   %s\n' "$badge" "$B" "$overall" "$R" "$bar" "$goal" "$right"
+fi
+[ "$scope" = "1" ] && now="↗ scope grew · $now"
+[ "${behind:-0}" = "1" ] && now="${WARN}⚑ plan behind${R} · $now"
+
+# --- line 2: breakdown · now ------------------------------------------------
+if [ -n "$phases" ]; then
+  # from the analyser: Setup ✓ · API route ✓ · Form ◐ 60% · Tests ○
+  left=""; IFS=';' read -ra parr <<< "$phases"
+  for p in "${parr[@]}"; do
+    pname=${p%|*}; ppct=${p##*|}
+    if   [ "${ppct:-0}" -ge 100 ]; then seg="${GOOD}${pname} ✓${R}"
+    elif [ "${ppct:-0}" -gt 0 ];   then seg="${WARN}${pname} ◐ ${ppct}%${R}"
+    else                                seg="${MUTE}${pname} ○${R}"; fi
+    [ -n "$left" ] && left="$left ${MUTE}·${R} "
+    left="$left$seg"
+  done
+elif [ "${total:-0}" -gt 0 ]; then
+  pending=$(( total - done - ip ))
+  left="${GOOD}✓ ${done}${R} ${MUTE}·${R} ${WARN}◐ ${ip}${R} ${MUTE}·${R} ${MUTE}○ ${pending} · of ${total} todos${R}"
+else
+  left="${MUTE}no checklist yet · ${edits} edits · ${commits} commits"
+  [ "${tests_pass:-0}" -gt 0 ] && left="$left · ${tests_pass} tests green"
+  left="$left${R}"
+fi
+if [ -n "$now" ]; then
+  printf '%s   %s›%s %snow:%s %s\n' "$left" "$MUTE" "$R" "$MUTE" "$R" "$now"
+elif [ -n "$hdetail" ]; then
+  printf '%s   %s› %s%s\n' "$left" "$MUTE" "$hdetail" "$R"
+else
+  printf '%s\n' "$left"
+fi
+exit 0

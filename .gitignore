@@ -1,0 +1,9 @@
+.DS_Store
+node_modules/
+*.tmp
+graphify-out/
+# Pulse runtime data lives in ~/.claude/pulse, never in the repo
+state/
+ticks/
+ledger.json
+pulse.log

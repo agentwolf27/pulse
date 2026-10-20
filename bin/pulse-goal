@@ -1,0 +1,60 @@
+#!/bin/bash
+# Pulse — set or show the goal card for the session running in the current directory.
+#   pulse-goal                          show the card
+#   pulse-goal goal <text>              set the goal (locked: the analyser will not rewrite it)
+#   pulse-goal phases A, B, C           set the phase names (percentages keep matching names, else 0)
+#   pulse-goal reset                    clear the card and the lock; the analyser rebuilds it next reply
+#   pulse-goal --session <id> ...       target a specific session instead of guessing from the cwd
+set -u
+export PATH="/usr/bin:/bin:$PATH"
+PULSE_HOME="${PULSE_HOME:-$HOME/.claude/pulse}"
+STATE_DIR="$PULSE_HOME/state"
+
+sid=""
+if [ "${1:-}" = "--session" ]; then sid=$2; shift 2; fi
+
+# Which session is "this one"? The newest transcript in this cwd's project folder.
+if [ -z "$sid" ]; then
+  slug=$(printf '%s' "$PWD" | sed 's/[^A-Za-z0-9]/-/g')
+  dir="$HOME/.claude/projects/$slug"
+  newest=$(ls -t "$dir"/*.jsonl 2>/dev/null | head -1)
+  [ -n "$newest" ] && sid=$(basename "$newest" .jsonl)
+fi
+[ -n "$sid" ] && [ -f "$STATE_DIR/$sid.json" ] || { echo "pulse: no session found for $PWD (start a chat here first, or pass --session <id>)"; exit 1; }
+state="$STATE_DIR/$sid.json"
+ts=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+
+merge() { local tmp="$state.tmp.$$"; jq "$@" "$state" > "$tmp" && mv -f "$tmp" "$state"; }
+
+show() {
+  jq -r '
+    def bar: (.overall // 0) as $p | ([range(0;10)] | map(if . < (($p + 5) / 10 | floor) then "▰" else "▱" end) | join(""));
+    "\(bar) \(.overall // 0)%  \(.goal // .title // "(no goal yet)")\(if .goal_locked then "  🔒" else "" end)",
+    "mode: \(.mode // "build") · source: \(.source // "heuristic") · health: \(.health.state // "active")",
+    (if (.phases | length) > 0 then "phases: " + ([.phases[] | "\(.name) \(.pct)%"] | join(" · ")) else "phases: (none yet)" end),
+    "now: \(.now // "—")",
+    "session: \(.session_id)"' "$state"
+}
+
+cmd=${1:-show}; shift || true
+case "$cmd" in
+  show|"") show ;;
+  plan)    exec "$(dirname "${BASH_SOURCE[0]}")/pulse-plan" "${1:-show}" "$PWD" ;;
+  goal)
+    text="$*"; [ -n "$text" ] || { echo "usage: pulse-goal goal <text>"; exit 2; }
+    merge --arg g "$text" --arg ts "$ts" '.goal = $g | .goal_locked = true | .scope_changed = false | .updated_at = $ts'
+    echo "goal set (locked): $text"; show ;;
+  phases)
+    text="$*"; [ -n "$text" ] || { echo "usage: pulse-goal phases A, B, C"; exit 2; }
+    merge --arg names "$text" --arg ts "$ts" '
+      (.phases // []) as $old
+      | .phases = ($names | split(",") | map(gsub("^\\s+|\\s+$"; "")) | map(select(length > 0))
+          | map(. as $n | ($old[] | select((.name | ascii_downcase) == ($n | ascii_downcase))) // { name: $n, pct: 0, weight: 2 }))
+      | .source = (if (.checklist | length) > 0 then "todos" else "llm" end)
+      | .updated_at = $ts'
+    echo "phases set"; show ;;
+  reset)
+    merge --arg ts "$ts" '.goal = null | .goal_locked = false | .phases = [] | .scope_changed = false | .source = (if (.checklist | length) > 0 then "todos" else "heuristic" end) | .updated_at = $ts'
+    echo "card cleared — the analyser rebuilds it after the next reply"; show ;;
+  *) echo "usage: pulse-goal [show | goal <text> | phases A, B, C | reset]"; exit 2 ;;
+esac

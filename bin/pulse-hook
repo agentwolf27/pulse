@@ -1,0 +1,353 @@
+#!/bin/bash
+# Pulse — hook dispatcher.
+#
+# Claude Code runs this on SessionStart, UserPromptSubmit, PostToolUse(TodoWrite),
+# Stop, PreCompact and SessionEnd, piping the hook JSON on stdin. It updates the
+# session's state file (~/.claude/pulse/state/<session_id>.json) and exits fast.
+# It never blocks Claude: no network, no LLM, exit 0 always.
+#
+# Phase 0: todos + transcript heuristics only. Phase 1 forks pulse-analyze from Stop.
+set -u
+[ -n "${PULSE_NESTED:-}" ] && exit 0            # never react to our own headless worker
+export PATH="/usr/bin:/bin:/usr/sbin:/sbin:/opt/homebrew/bin:/usr/local/bin:$PATH"
+
+PULSE_HOME="${PULSE_HOME:-$HOME/.claude/pulse}"
+STATE_DIR="$PULSE_HOME/state"
+LOG="$PULSE_HOME/pulse.log"
+mkdir -p "$STATE_DIR"
+
+input=$(cat)
+[ -z "$input" ] && exit 0
+
+IFS=$'\x1f' read -r ev sid tp cwd < <(printf '%s' "$input" \
+  | jq -r '[.hook_event_name//"", .session_id//"", .transcript_path//"", .cwd//""] | join("")')
+[ -z "$sid" ] && exit 0
+
+state="$STATE_DIR/$sid.json"
+ts=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+
+log() { printf '%s %s %s %s\n' "$ts" "${sid:0:8}" "$ev" "$*" >> "$LOG"; }
+
+# merge FILTER [jq args...] — apply a jq filter to the state file, atomically.
+merge() {
+  local filter=$1; shift
+  local tmp="$state.tmp.$$"
+  if [ -f "$state" ]; then
+    jq "$@" "$filter" "$state" > "$tmp" 2>>"$LOG" && mv -f "$tmp" "$state"
+  else
+    jq -n "$@" "$filter" > "$tmp" 2>>"$LOG" && mv -f "$tmp" "$state"
+  fi
+  rm -f "$tmp"
+}
+
+init_state() {
+  local project size seed
+  project=$(basename "${cwd:-$PWD}")
+  size=0; [ -f "$tp" ] && size=$(stat -f%z "$tp")
+  seed=$(( size > 2097152 ? size - 2097152 : 0 ))   # existing transcript: only look at the last 2 MB
+  merge '{
+    session_id: $sid, project: $project, transcript_path: $tp, cwd: $cwd,
+    mode: "build", goal: null, title: null,
+    overall: 0, source: "heuristic", phases: [], now: null, checklist: [],
+    health: { state: "active", detail: "" }, scope_changed: false,
+    turns: 0, replies: 0, subagents: 0, cursor: $seed, history: [],
+    stats: { edits: 0, tests: 0, tests_pass: 0, commits: 0, asks: 0, errors: 0 },
+    first_prompt: null, last_prompt: null, last_tool: null, last_text: null,
+    started_at: $ts, updated_at: $ts, ended: false
+  }' --arg sid "$sid" --arg project "$project" --arg tp "$tp" --arg cwd "$cwd" \
+     --argjson seed "$seed" --arg ts "$ts"
+  log "init project=$project seed=$seed"
+}
+
+# notify_transition PREV — a macOS notification when the session enters a state worth a look.
+# pulse-notify has a 10-minute cooldown per session+state and honours ~/.claude/pulse/notify.off.
+notify_transition() {
+  local prev=$1 cur label project goal detail
+  cur=$(jq -r '.health.state // "active"' "$state")
+  [ "$cur" = "$prev" ] && return 0
+  case "$cur" in
+    needs_you) label="needs you" ;;
+    looping)   label="looks stuck" ;;
+    done)      label="done" ;;
+    context)   label="context nearly full" ;;
+    *) return 0 ;;
+  esac
+  IFS=$'\x1f' read -r project goal detail < <(jq -r '[ (.project // ""), ((.goal // .title // .first_prompt // "") | .[0:60]), (.health.detail // "") ] | join("")' "$state")
+  [ -x "$PULSE_HOME/bin/pulse-notify" ] || return 0
+  ("$PULSE_HOME/bin/pulse-notify" --key "$sid:$cur" "Pulse · $project · $label" "${goal}${detail:+ — $detail}" >/dev/null 2>&1 &)
+}
+
+# scan_transcript — read only the bytes added since .cursor, summarise them, fold into state.
+scan_transcript() {
+  [ -f "$tp" ] || return 0
+  local cursor size chunk n added summary
+  cursor=$(jq -r '.cursor // 0' "$state")
+  size=$(stat -f%z "$tp")
+  [ "$size" -le "$cursor" ] && return 0
+  # A resumed session can be far behind; never scan more than the last 2 MB in one go.
+  [ $((size - cursor)) -gt 4194304 ] && cursor=$((size - 2097152))
+
+  chunk=$(mktemp "$PULSE_HOME/chunk.XXXXXX") || return 0
+  trap 'rm -f "$chunk" "$chunk.2"' RETURN
+  tail -c +$((cursor + 1)) "$tp" > "$chunk"
+  # Keep only complete lines — the transcript may be mid-write.
+  if [ "$(tail -c 1 "$chunk" | od -An -tx1 | tr -d ' \n')" != "0a" ]; then
+    n=$(wc -l < "$chunk" | tr -d ' ')
+    head -n "$n" "$chunk" > "$chunk.2" && mv -f "$chunk.2" "$chunk"
+  fi
+  added=$(stat -f%z "$chunk")
+  [ "$added" -eq 0 ] && return 0
+
+  summary=$(jq -R -c 'fromjson? // empty' "$chunk" | jq -s -c '
+    def tools:  [ .[] | select(.type=="assistant") | .message.content[]? | select(.type=="tool_use") ];
+    def texts:  [ .[] | select(.type=="assistant") | .message.content[]? | select(.type=="text") | .text ];
+    def utexts: [ .[] | select(.type=="user") | .message.content
+                  | if type=="string" then . elif type=="array" then (map(select(.type=="text") | .text) | join(" ")) else empty end
+                  | select(length > 0) ];
+    def results: [ .[] | select(.type=="user") | .message.content | arrays | .[] | select(.type=="tool_result")
+                   | { id: .tool_use_id,
+                       text: (.content | if type=="string" then . elif type=="array" then (map(.text? // "") | join(" ")) else "" end) } ];
+    def testre: "(^|[ /;&|])(npm|pnpm|yarn|bun) (run )?test|pytest|jest|vitest|go test|cargo test|mvn test|gradle test|rspec|phpunit";
+    # a non-zero failure count, an upper-case FAIL, or a runner error — "0 failed" is a pass
+    def failre: "([1-9][0-9]*) (failed|failing|errors?)\\b|\\bFAIL(ED)?\\b|Tests? failed|npm ERR|Error:|Traceback";
+    (tools) as $t | (results) as $r
+    | ($t | map(select(.name=="Bash" and ((.input.command // "") | test(testre; "i")))) | map(.id)) as $testids
+    | {
+        title:      ([ .[] | select(.type=="custom-title") | .customTitle ] | last),
+        first_user: (utexts | first | if . == null then null else .[0:500] end),
+        last_user:  (utexts | last  | if . == null then null else .[0:500] end),
+        edits:      ([ $t[] | select(.name | IN("Edit","Write","MultiEdit","NotebookEdit")) ] | length),
+        tests:      ($testids | length),
+        tests_pass: ([ $r[] | select(.id as $i | $testids | index($i)) | select(.text | test(failre) | not) ] | length),
+        commits:    ([ $t[] | select(.name=="Bash") | .input.command // "" | select(test("git commit"; "i")) ] | length),
+        asks:       ([ $t[] | select(.name=="AskUserQuestion") ] | length),
+        errors:     ([ $r[] | select(.text | test("error|failed|exception|traceback"; "i")) ] | length),
+        last_tool:  ($t | last | if . == null then null else
+                      { name,
+                        human: (.name == "Bash" and .input.description != null),
+                        arg: ((if .name == "Bash" then (.input.description // ((.input.command // "") | split("\n") | first))
+                               else (.input.file_path // .input.query // .input.pattern // .input.description // "") end)
+                              | tostring | .[0:80]) } end),
+        last_text:  (texts | last | if . == null then null else .[0:300] end),
+        replies:    ([ .[] | select(.type=="assistant") ] | length),
+        # one message can span several records — count its usage once
+        usage:      ([ .[] | select(.type=="assistant" and .message.usage != null) | { id: (.message.id // .uuid), u: .message.usage } ]
+                     | unique_by(.id) | map(.u)
+                     | { in: (map(.input_tokens // 0) | add // 0), out: (map(.output_tokens // 0) | add // 0),
+                         cr: (map(.cache_read_input_tokens // 0) | add // 0), cw: (map(.cache_creation_input_tokens // 0) | add // 0) }),
+        model:      ([ .[] | select(.type=="assistant") | .message.model | select(. != null) ] | last),
+        # for loop detection: each call signature and whether its result failed
+        calls:      [ $t[] | . as $c
+                      | { sig: "\($c.name)|\(($c.input // {}) | tojson | .[0:120])",
+                          fail: (([ $r[] | select(.id == $c.id) | .text ] | first // "") | test(failre)) } ],
+        errs:       [ $r[] | select(.text | test("error|failed|exception|traceback"; "i"))
+                      | .text | ascii_downcase | gsub("[0-9]+"; "#") | .[0:100] ],
+        # the last reply total input ≈ how full the context is right now
+        ctx_tokens: ([ .[] | select(.type=="assistant" and .message.usage != null) | .message.usage
+                      | ((.input_tokens // 0) + (.cache_read_input_tokens // 0) + (.cache_creation_input_tokens // 0)) ] | last)
+      }' 2>>"$LOG")
+  [ -z "$summary" ] && return 0
+
+  # sub-agent transcripts written in the last two minutes
+  local subdir="${tp%.jsonl}/subagents" subs=0
+  [ -d "$subdir" ] && subs=$(find "$subdir" -name '*.jsonl' -mmin -2 2>/dev/null | wc -l | tr -d ' ')
+  # is the default model a 1M-context variant (e.g. "opus[1m]")?
+  local onem=false
+  grep -q '"model": *"[^"]*\[1m\]' "$HOME/.claude/settings.json" 2>/dev/null && onem=true
+
+  merge '
+    .cursor = $newcur
+    | .title        = ($s.title // .title)
+    | .first_prompt = (.first_prompt // $s.first_user)
+    | .last_prompt  = ($s.last_user // .last_prompt)
+    | .stats.edits += $s.edits | .stats.tests += $s.tests | .stats.tests_pass += $s.tests_pass
+    | .stats.commits += $s.commits | .stats.asks += $s.asks | .stats.errors += $s.errors
+    | .replies     += $s.replies
+    | .tokens = ((.tokens // { in: 0, out: 0, cr: 0, cw: 0 })
+                 | .in += $s.usage.in | .out += $s.usage.out | .cr += $s.usage.cr | .cw += $s.usage.cw)
+    | .model        = ($s.model // .model)
+    | .last_tool    = ($s.last_tool // .last_tool)
+    | .last_text    = ($s.last_text // .last_text)
+    | .subagents    = $subs
+    # rolling windows for loop detection
+    | .recent_calls  = ((.recent_calls // []) + $s.calls)  | .recent_calls  |= .[-10:]
+    | .recent_errors = ((.recent_errors // []) + $s.errs)  | .recent_errors |= .[-5:]
+    | (.recent_calls | group_by(.sig) | map(select(length >= 3 and all(.[]; .fail))) | first) as $loop
+    | (if $loop == null then 0 else ($loop | length) end) as $rep
+    | (if $loop == null then "" else ($loop[0].sig | split("|")[0]) end) as $loopname
+    | (if (.recent_errors | length) >= 3 and (.recent_errors[-3:] | unique | length) == 1 then .recent_errors[-1] else "" end) as $reperr
+    # context pressure: exact figure comes from the statusline sidecar when there is one; this is the fallback
+    | .ctx_tokens  = ($s.ctx_tokens // .ctx_tokens)
+    # window: 1M if the default model is a [1m] variant or the session is already past 200k, else 200k
+    | .ctx_pct_est = (if .ctx_tokens then ((.ctx_tokens / (if $onem or .ctx_tokens > 190000 then 1000000 else 200000 end)) * 100 | floor) else null end)
+    # one health state, by priority: needs you › looping › context › (done, set elsewhere) › active
+    | .health = (if ($s.last_tool.name // "") == "AskUserQuestion"
+                 then { state: "needs_you", detail: "asked you a question" }
+                 elif $rep >= 3 then { state: "looping", detail: "same \($loopname) call failed ×\($rep)" }
+                 elif $reperr != "" then { state: "looping", detail: "same error ×3: \($reperr | .[0:48])" }
+                 elif (.ctx_pct_est // 0) >= 90 and (.health.state | IN("active", "context", "needs_you", "looping"))
+                 then { state: "context", detail: "context \(.ctx_pct_est)% full" }
+                 elif (.health.state | IN("needs_you", "looping", "context")) then { state: "active", detail: "" }
+                 else .health end)
+    # "now": an in-progress todo wins; otherwise describe the last tool call; otherwise the last sentence.
+    | .now = (if .source == "todos" and .now != null then .now
+              elif $s.last_tool != null then
+                (if $s.last_tool.name == "Bash" then
+                   (if $s.last_tool.human then ($s.last_tool.arg | .[0:1] | ascii_downcase) + ($s.last_tool.arg | .[1:80])
+                    else "running " + ($s.last_tool.arg | .[0:72]) end)
+                 elif ($s.last_tool.name | IN("Edit","Write","MultiEdit","NotebookEdit")) then "editing " + ($s.last_tool.arg | split("/") | last)
+                 elif $s.last_tool.name == "Read" then "reading " + ($s.last_tool.arg | split("/") | last)
+                 elif $s.last_tool.name == "AskUserQuestion" then "waiting for your answer"
+                 elif $s.last_tool.name == "Agent" and $s.last_tool.arg != "" then ($s.last_tool.arg | .[0:1] | ascii_downcase) + ($s.last_tool.arg | .[1:80])
+                 elif $s.last_tool.name == "Agent" then "running a subagent"
+                 elif $s.last_tool.name == "SendMessage" then "messaging a teammate"
+                 elif $s.last_tool.name == "TodoWrite" then "updating the checklist"
+                 elif ($s.last_tool.name | IN("Grep","Glob")) then "searching the code"
+                 elif $s.last_tool.name == "WebSearch" then "searching the web"
+                 elif $s.last_tool.name == "WebFetch" then "reading a web page"
+                 elif $s.last_tool.name == "Artifact" then "publishing an artifact"
+                 elif $s.last_tool.name == "Skill" then "using a skill"
+                 elif ($s.last_tool.name | startswith("mcp__")) then "using " + ($s.last_tool.name | split("__")[1] | gsub("[_-]"; " ")) + " tool"
+                 else ($s.last_tool.name | ascii_downcase) end)
+              elif $s.last_text != null then ($s.last_text | gsub("[\n\r]+"; " ") | .[0:60])
+              else .now end)
+    # Until either a checklist or the analyser has spoken, a capped heuristic: something is
+    # happening, but we cannot say how much. Never overwrite a todos- or LLM-derived number.
+    | (if .source == "heuristic"
+       then .overall = ([30, (3 + .stats.edits * 2 + .stats.tests_pass * 4 + .stats.commits * 6)] | min)
+       else . end)
+    | .stopped_at = $ts | .updated_at = $ts
+    | .history += [[$ts, .overall]] | .history |= .[-60:]
+  ' --argjson newcur "$((cursor + added))" --argjson s "$summary" --arg ts "$ts" --argjson subs "${subs:-0}" --argjson onem "$onem"
+  log "scan +${added}B edits=$(jq -r .edits <<<"$summary") tests=$(jq -r .tests <<<"$summary") last=$(jq -r '.last_tool.name // "-"' <<<"$summary") health=$(jq -r '.health.state' "$state")"
+}
+
+case "$ev" in
+  SessionStart)
+    [ -f "$state" ] || init_state
+    merge '.ended = false | .health = { state: "active", detail: "" } | .updated_at = $ts' --arg ts "$ts"
+    # Make sure the dashboard is up. `start` returns at once if it already is.
+    if [ -x "$PULSE_HOME/bin/pulse-dash" ]; then
+      ("$PULSE_HOME/bin/pulse-dash" start >/dev/null 2>&1 &)
+    fi
+    # And the menu bar. SwiftBar quits when you log out or quit it by hand; this brings it
+    # back with the first Claude session. Silent when it is already running or not installed.
+    if [ -z "${PULSE_MENUBAR_OFF:-}" ] && ! pgrep -x SwiftBar >/dev/null 2>&1; then
+      for app in /Applications/SwiftBar.app "$HOME/Applications/SwiftBar.app"; do
+        [ -d "$app" ] && { (open -g "$app" >/dev/null 2>&1 &); log "menubar: started SwiftBar"; break; }
+      done
+    fi
+    # Tell this session about the project's plan file, so Claude keeps it ticked.
+    # Silent when the project has no plan. This is the ONLY place the hook writes to stdout.
+    if [ -x "$PULSE_HOME/bin/pulse-plan" ]; then
+      ctx=$("$PULSE_HOME/bin/pulse-plan" context "${cwd:-$PWD}" 2>/dev/null)
+      if [ -n "$ctx" ]; then
+        jq -n --arg c "$ctx" '{hookSpecificOutput: {hookEventName: "SessionStart", additionalContext: $c}}'
+        log "context injected (${#ctx} chars)"
+      fi
+    fi
+    ;;
+
+  UserPromptSubmit)
+    [ -f "$state" ] || init_state
+    prompt=$(printf '%s' "$input" | jq -r '(.prompt // "") | .[0:500]')
+    merge '
+      .first_prompt //= $p | .last_prompt = $p
+      | .turns += 1
+      # the person stepped in: waiting / looping / context are resolved by definition
+      | (if (.health.state | IN("needs_you", "looping", "context", "done")) then .health = { state: "active", detail: "" } else . end)
+      | (if .health.state == "looping" or .recent_calls != null then .recent_calls = [] | .recent_errors = [] else . end)
+      | (if .now == "waiting for your answer" then .now = "reading your reply" else . end)
+      | .user_at = $ts | .updated_at = $ts
+    ' --arg p "$prompt" --arg ts "$ts"
+    ;;
+
+  PostToolUse)
+    [ -f "$state" ] || init_state
+    tool=$(printf '%s' "$input" | jq -r '.tool_name // ""')
+    if [ "$tool" = "TodoWrite" ]; then
+      todos=$(printf '%s' "$input" | jq -c '.tool_input.todos // []')
+      prev_health=$(jq -r '.health.state // "active"' "$state")
+      merge '
+        ($todos | length) as $n
+        | ([ $todos[] | select(.status == "completed") ] | length) as $d
+        | ([ $todos[] | select(.status == "in_progress") ] | length) as $ip
+        | .checklist = ($todos | map({ text: .content, status: .status, done: (.status == "completed"), active: (.activeForm // null) }))
+        | (if $n > 0 then
+             .overall = ((($d + 0.5 * $ip) / $n * 100) | floor)
+             | .source = "todos"
+             | .now = (if $d == $n then "all \($n) todos done"
+                       else ([ $todos[] | select(.status == "in_progress") | (.activeForm // .content) ] | first) // .now end)
+             | .health = (if $d == $n then { state: "done", detail: "all \($n) todos done" } else .health end)
+           else . end)
+        | .updated_at = $ts
+        | .history += [[$ts, .overall]] | .history |= .[-60:]
+      ' --argjson todos "$todos" --arg ts "$ts"
+      notify_transition "$prev_health"
+      log "todos $(jq -r 'length' <<<"$todos") overall=$(jq -r .overall "$state")"
+    elif [ "$tool" = "Edit" ] || [ "$tool" = "Write" ] || [ "$tool" = "MultiEdit" ]; then
+      # Tick-guard: Claude just edited a plan file. If it ticked an outcome, run that outcome's
+      # VERIFY now and, when the check fails, say so in-turn. Pulse never unticks — it refuses to believe.
+      fp=$(printf '%s' "$input" | jq -r '.tool_input.file_path // .tool_input.notebook_path // ""')
+      case "$(basename "$fp")" in
+        PLAN.md|ROADMAP.md|PLANNING.md|MILESTONES.md|TODO.md|tasks.md)
+          if [ -x "$PULSE_HOME/bin/pulse-plan" ] && [ ! -f "$PULSE_HOME/verify.off" ]; then
+            out=$("$PULSE_HOME/bin/pulse-plan" tickguard "$fp" 2>>"$LOG")
+            if [ -n "$out" ]; then printf '%s' "$out"; log "tick-guard: a newly ticked outcome failed its VERIFY in $(basename "$fp")"; fi
+          fi ;;
+      esac
+    fi
+    ;;
+
+  Stop)
+    [ -f "$state" ] || init_state
+    prev_health=$(jq -r '.health.state // "active"' "$state")
+    scan_transcript
+    notify_transition "$prev_health"
+    # Drift nudge: when the analyser found the plan file behind the work, ask Claude once — at most
+    # every 30 minutes, only if files were edited since the last nudge — to tick what is verified.
+    # `decision: block` makes Claude act on the reason before finishing. Silenced by nudge.off.
+    if [ "$(jq -r '.plan_behind // false' "$state")" = "true" ] && [ ! -f "$PULSE_HOME/nudge.off" ] \
+       && [ "$(printf '%s' "$input" | jq -r '.stop_hook_active // false')" != "true" ]; then
+      last=$(jq -r '.nudged_at // ""' "$state"); last_s=0
+      [ -n "$last" ] && last_s=$(TZ=UTC date -j -f '%Y-%m-%dT%H:%M:%SZ' "$last" +%s 2>/dev/null || echo 0)
+      edits_since=$(jq -r '(.stats.edits // 0) - (.nudged_edits // 0)' "$state")
+      if [ $(( $(date +%s) - last_s )) -gt 1800 ] && [ "${edits_since:-0}" -gt 0 ]; then
+        detail=$(jq -r '.plan_behind_detail // ""' "$state"); planname=$(jq -r '.plan.name // "PLAN.md"' "$state")
+        merge '.nudged_at = $ts | .nudged_edits = (.stats.edits // 0)' --arg ts "$ts"
+        # additionalContext on Stop continues the turn with the note as feedback, without the
+        # "hook error" rendering that `decision: block` gets. Same loop protections apply.
+        jq -n --arg r "Pulse: $planname looks behind the work done in this chat ($detail). Before you finish: run the VERIFY command of each outcome you believe is done, tick only the ones that pass, and add outcomes for work you discovered. Do not restructure the file. Then complete your reply." '{ hookSpecificOutput: { hookEventName: "Stop", additionalContext: $r } }'
+        log "nudge: plan behind ($detail)"
+      fi
+    fi
+    # The brain runs in the background; this hook has already done its fast work.
+    if [ -x "$PULSE_HOME/bin/pulse-analyze" ] && [ -f "$tp" ]; then
+      (PULSE_NESTED=1 nohup "$PULSE_HOME/bin/pulse-analyze" "$sid" "$tp" >/dev/null 2>&1 &)
+    fi
+    ;;
+
+  PreCompact)
+    [ -f "$state" ] || init_state
+    # The early chat is about to become a summary. Keep the goal card where the analyser
+    # reads it from (state), and reset the loop windows — repetition before compaction is stale.
+    merge '
+      .compactions = ((.compactions // 0) + 1) | .compacted_at = $ts | .updated_at = $ts
+      | .goal_card_snapshot = { goal: .goal, mode: .mode, phases: .phases, first_prompt: .first_prompt, at: $ts }
+      | .recent_calls = [] | .recent_errors = []
+      | (if .health.state == "context" then .health = { state: "active", detail: "" } else . end)
+    ' --arg ts "$ts"
+    log "compact #$(jq -r .compactions "$state")"
+    ;;
+
+  SessionEnd)
+    [ -f "$state" ] || init_state
+    merge '
+      .ended = true | .ended_at = $ts | .updated_at = $ts
+      | .health = (if .overall >= 100 then { state: "done", detail: "" } else { state: "ended", detail: "" } end)
+    ' --arg ts "$ts"
+    log "end overall=$(jq -r .overall "$state")"
+    ;;
+esac
+
+exit 0

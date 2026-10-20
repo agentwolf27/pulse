@@ -1,0 +1,25 @@
+#!/bin/bash
+# Pulse — macOS notification with a per-key cooldown.
+#   pulse-notify --key <session>:<state> "<title>" "<message>"
+# Silent if ~/.claude/pulse/notify.off exists. One notification per key per 10 minutes.
+set -u
+export PATH="/usr/bin:/bin:$PATH"
+PULSE_HOME="${PULSE_HOME:-$HOME/.claude/pulse}"
+[ -f "$PULSE_HOME/notify.off" ] && exit 0
+
+key=""
+if [ "${1:-}" = "--key" ]; then key=$2; shift 2; fi
+title=${1:-Pulse}; msg=${2:-}
+
+if [ -n "$key" ]; then
+  stamps="$PULSE_HOME/notified"; mkdir -p "$stamps"
+  stamp="$stamps/$(printf '%s' "$key" | tr -c 'A-Za-z0-9_.:-' '_')"
+  if [ -f "$stamp" ] && [ -n "$(find "$stamp" -mmin -10 2>/dev/null)" ]; then exit 0; fi
+  touch "$stamp"
+  find "$stamps" -type f -mmin +120 -delete 2>/dev/null
+fi
+
+# osascript strings: escape backslashes and double quotes
+esc() { printf '%s' "$1" | sed 's/\\/\\\\/g; s/"/\\"/g'; }
+osascript -e "display notification \"$(esc "$msg")\" with title \"$(esc "$title")\" sound name \"Pop\"" >/dev/null 2>&1 || true
+exit 0

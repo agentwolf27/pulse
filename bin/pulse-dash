@@ -1,0 +1,69 @@
+#!/bin/bash
+# Pulse — dashboard launcher.
+#   pulse-dash            start in the background if needed, print the URL
+#   pulse-dash start      same
+#   pulse-dash run        run in the foreground (logs to the terminal)
+#   pulse-dash stop       stop the background server
+#   pulse-dash status     up or down (exit 1 when down)
+#   pulse-dash open       start if needed, then open it in the browser
+#   pulse-dash url        print the URL
+set -u
+export PATH="/usr/bin:/bin:/usr/sbin:/sbin:/opt/homebrew/bin:/usr/local/bin:$PATH"
+
+PULSE_HOME="${PULSE_HOME:-$HOME/.claude/pulse}"
+PORT="${PULSE_PORT:-7788}"
+URL="http://127.0.0.1:$PORT"
+HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"   # physical path: ~/.claude/pulse/bin is a symlink
+SERVER="$HERE/../lib/dash.js"
+PIDF="$PULSE_HOME/dash.pid"
+LOGF="$PULSE_HOME/dash.log"
+mkdir -p "$PULSE_HOME"
+
+# Hooks run with a minimal PATH — node from nvm/homebrew is usually not on it.
+find_node() {
+  command -v node 2>/dev/null && return 0
+  local n
+  n=$(ls -1d "$HOME"/.nvm/versions/node/*/bin/node 2>/dev/null | sort -V | tail -1)
+  [ -n "$n" ] && [ -x "$n" ] && { echo "$n"; return 0; }
+  for n in /opt/homebrew/bin/node /usr/local/bin/node; do
+    [ -x "$n" ] && { echo "$n"; return 0; }
+  done
+  return 1
+}
+up() { curl -s -m 1 -o /dev/null "$URL/healthz"; }
+
+cmd="${1:-start}"
+case "$cmd" in
+  start)
+    if up; then echo "pulse dashboard: $URL"; exit 0; fi
+    NODE=$(find_node) || { echo "pulse-dash: node not found — install Node 18+ (nvm or homebrew)" >&2; exit 1; }
+    [ -f "$SERVER" ] || { echo "pulse-dash: missing $SERVER" >&2; exit 1; }
+    nohup env PULSE_HOME="$PULSE_HOME" PULSE_PORT="$PORT" "$NODE" "$SERVER" >>"$LOGF" 2>&1 &
+    echo $! > "$PIDF"
+    # wait (≤2 s) for the port to come up so callers can rely on it
+    for _ in $(seq 1 20); do up && break; sleep 0.1; done
+    if up; then echo "pulse dashboard: $URL"; else echo "pulse-dash: failed to start — see $LOGF" >&2; exit 1; fi
+    ;;
+  run)
+    NODE=$(find_node) || { echo "pulse-dash: node not found" >&2; exit 1; }
+    exec env PULSE_HOME="$PULSE_HOME" PULSE_PORT="$PORT" "$NODE" "$SERVER"
+    ;;
+  stop)
+    if [ -f "$PIDF" ] && kill "$(cat "$PIDF")" 2>/dev/null; then
+      rm -f "$PIDF"; echo "stopped"
+    else
+      p=$(lsof -ti tcp:"$PORT" 2>/dev/null)
+      if [ -n "$p" ]; then kill $p && echo "stopped"; else echo "not running"; fi
+    fi
+    ;;
+  status)
+    if up; then echo "up: $URL"; else echo "down"; exit 1; fi
+    ;;
+  open)
+    "$0" start >/dev/null
+    sleep 0.3
+    open "$URL"
+    ;;
+  url) echo "$URL" ;;
+  *) echo "usage: pulse-dash [start|run|stop|status|open|url]" >&2; exit 2 ;;
+esac

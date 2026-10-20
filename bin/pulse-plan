@@ -1,0 +1,69 @@
+#!/bin/bash
+# Pulse — the project's plan file: read it, or create one.
+#   pulse-plan                 show this project's plan and progress
+#   pulse-plan context [cwd]   print the line the SessionStart hook injects (empty if no plan)
+#   pulse-plan json [cwd]      machine-readable project + plan
+#   pulse-plan init [cwd]      write a starter PLAN.md, seeded from this project's live goal card
+set -u
+export PATH="/usr/bin:/bin:/usr/sbin:/sbin:/opt/homebrew/bin:/usr/local/bin:$PATH"
+PULSE_HOME="${PULSE_HOME:-$HOME/.claude/pulse}"
+HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
+
+find_node() {
+  command -v node 2>/dev/null && return 0
+  local n
+  n=$(ls -1d "$HOME"/.nvm/versions/node/*/bin/node 2>/dev/null | sort -V | tail -1)
+  [ -n "$n" ] && [ -x "$n" ] && { echo "$n"; return 0; }
+  for n in /opt/homebrew/bin/node /usr/local/bin/node; do [ -x "$n" ] && { echo "$n"; return 0; }; done
+  return 1
+}
+NODE=$(find_node) || { echo "pulse-plan: node not found" >&2; exit 1; }
+
+cmd=${1:-show}; [ $# -gt 0 ] && shift
+cwd=${1:-$PWD}
+
+case "$cmd" in
+  context|json) exec env PULSE_HOME="$PULSE_HOME" "$NODE" "$HERE/../lib/plan.js" "$cmd" "$cwd" ;;
+  show)         exec env PULSE_HOME="$PULSE_HOME" "$NODE" "$HERE/../lib/plan.js" show "$cwd" ;;
+  draft|reconcile) exec env PULSE_HOME="$PULSE_HOME" PULSE_NESTED=1 "$NODE" "$HERE/../lib/draft.js" "$cmd" "$@" ;;
+  verify)          exec env PULSE_HOME="$PULSE_HOME" PULSE_NESTED=1 "$NODE" "$HERE/../lib/verify.js" "$@" ;;
+  tickguard)       exec env PULSE_HOME="$PULSE_HOME" PULSE_NESTED=1 "$NODE" "$HERE/../lib/verify.js" tickguard "$cwd" ;;
+  next)            exec env PULSE_HOME="$PULSE_HOME" "$NODE" "$HERE/../lib/plan.js" next "$cwd" ;;
+  init) ;;
+  *) echo "usage: pulse-plan [show | init | draft [--dry-run] | verify [--dry-run|--apply] | reconcile [--apply 1,3] | context [cwd] | json [cwd]]" >&2; exit 2 ;;
+esac
+
+# ---- init -------------------------------------------------------------------
+root=$(env PULSE_HOME="$PULSE_HOME" "$NODE" "$HERE/../lib/plan.js" json "$cwd" | jq -r '.project.root // empty')
+[ -n "$root" ] || { echo "pulse-plan: $cwd is not inside a project (no git repo found)"; exit 1; }
+target="$root/PLAN.md"
+[ -e "$target" ] && { echo "pulse-plan: $target already exists — nothing written"; exit 1; }
+
+name=$(basename "$root")
+TEMPLATE="$PULSE_HOME/templates/PLAN.md"; [ -f "$TEMPLATE" ] || TEMPLATE="$HERE/../templates/PLAN.md"
+# Seed from the project's most recent goal card, if Pulse has one.
+seed=$(jq -s -r --arg root "$root" '
+  [ .[] | select(.cwd != null) | select((.cwd | startswith($root))) | select(.goal != null) ]
+  | sort_by(.updated_at) | last
+  | if . == null then "" else "\(.goal)\([.phases[]?.name] | join(""))" end
+' "$PULSE_HOME"/state/*.json 2>/dev/null)
+goal=${seed%%$'\x1f'*}
+phases_raw=${seed#*$'\x1f'}
+
+# Fall back to the README's first real sentence.
+if [ -z "$goal" ] && [ -f "$root/README.md" ]; then
+  goal=$(grep -v '^\s*$' "$root/README.md" | grep -v '^\s*[#>!\[]' | head -1 | cut -c1-90)
+fi
+[ -n "$goal" ] || goal="_one sentence: what this project is, and how you will know it is done_"
+
+# The house template (templates/PLAN.md: five sections, the pulse marker and a
+# VERIFY per outcome), with the name and the first paragraph filled in from what Pulse knows.
+sed -e "s/<Project Name>/$(printf '%s' "$name" | sed 's/[\/&]/\\&/g')/" \
+    -e "0,/^One paragraph\..*/s//$(printf '%s' "$goal" | sed 's/[\/&]/\\&/g')/" \
+    "$TEMPLATE" > "$target"
+
+echo "wrote $target"
+echo
+env PULSE_HOME="$PULSE_HOME" "$NODE" "$HERE/../lib/plan.js" show "$root"
+echo
+echo "Edit it, then every session in this project sees it and Pulse counts it."

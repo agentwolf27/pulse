@@ -1,0 +1,25 @@
+#!/bin/bash
+# Pulse — analyser launcher. Forked in the background by the Stop hook.
+#   pulse-analyze <session_id> [transcript_path]   analyse one session (respects debounce + lock)
+#   pulse-analyze --force <session_id> [path]      ignore the debounce
+#   pulse-analyze --dry-run <session_id> [path]    print the prompt, call nothing
+set -u
+export PATH="/usr/bin:/bin:/usr/sbin:/sbin:/opt/homebrew/bin:/usr/local/bin:$PATH"
+export PULSE_NESTED=1                                    # the headless worker must never trigger our hooks
+
+PULSE_HOME="${PULSE_HOME:-$HOME/.claude/pulse}"
+HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
+SCRIPT="$HERE/../lib/analyze.js"
+
+find_node() {
+  command -v node 2>/dev/null && return 0
+  local n
+  n=$(ls -1d "$HOME"/.nvm/versions/node/*/bin/node 2>/dev/null | sort -V | tail -1)
+  [ -n "$n" ] && [ -x "$n" ] && { echo "$n"; return 0; }
+  for n in /opt/homebrew/bin/node /usr/local/bin/node; do
+    [ -x "$n" ] && { echo "$n"; return 0; }
+  done
+  return 1
+}
+NODE=$(find_node) || { echo "pulse-analyze: node not found" >&2; exit 1; }
+exec env PULSE_HOME="$PULSE_HOME" "$NODE" "$SCRIPT" "$@"

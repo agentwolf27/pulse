@@ -1,0 +1,287 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Pulse</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Ccircle cx='8' cy='8' r='6' fill='%238C93FF'/%3E%3C/svg%3E">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500&display=swap">
+<style>
+  :root {
+    color-scheme: dark;
+    --ground: #0F131A; --surface: #161C25; --surface-2: #1C2330;
+    --line: #262F3C; --line-soft: #1C2431;
+    --ink: #E7E4DC; --ink-2: #A8AEBB; --mute: #78818F;
+    --accent: #8C93FF; --track: #262E3B;
+    --good: #4FC98C; --warn: #F0B44C; --crit: #F2646D; --info: #5FB6E8;
+  }
+  @media (prefers-color-scheme: light) {
+    :root {
+      color-scheme: light;
+      --ground: #FBFAF7; --surface: #FFFFFF; --surface-2: #F2F1EC;
+      --line: #E2DFD7; --line-soft: #EDEBE4;
+      --ink: #1A1F29; --ink-2: #454C59; --mute: #6B7382;
+      --accent: #5A62E6; --track: #E4E2DA;
+      --good: #1F9D5C; --warn: #B07512; --crit: #D23F4A; --info: #2C7FB8;
+    }
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; background: var(--ground); color: var(--ink); }
+  body { font: 14px/1.45 "IBM Plex Sans", -apple-system, "Helvetica Neue", Arial, sans-serif; -webkit-font-smoothing: antialiased; padding-bottom: 40px; }
+  .mono, .num { font-family: "IBM Plex Mono", ui-monospace, Menlo, monospace; font-variant-numeric: tabular-nums; }
+  :focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; border-radius: 3px; }
+  button { font: inherit; color: inherit; background: none; border: 0; cursor: pointer; }
+
+  /* ---- header ---- */
+  header {
+    position: sticky; top: 0; z-index: 5; display: flex; align-items: center; gap: 16px; flex-wrap: wrap;
+    padding: 11px 20px; border-bottom: 1px solid var(--line-soft);
+    background: color-mix(in srgb, var(--ground) 92%, transparent); backdrop-filter: blur(12px);
+  }
+  .brand { display: flex; align-items: center; gap: 8px; font-weight: 600; font-size: 15px; letter-spacing: -.01em; }
+  .brand i { width: 8px; height: 8px; border-radius: 50%; background: var(--accent); animation: beat 2.6s ease-out infinite; }
+  @keyframes beat { 0% { box-shadow: 0 0 0 0 color-mix(in srgb, var(--accent) 50%, transparent); } 70% { box-shadow: 0 0 0 8px transparent; } 100% { box-shadow: 0 0 0 0 transparent; } }
+  .sum { font-family: "IBM Plex Mono", monospace; font-size: 12px; color: var(--mute); font-variant-numeric: tabular-nums; }
+  .sum b { color: var(--ink-2); font-weight: 500; }
+  .sum .w { color: var(--warn); } .sum .c { color: var(--crit); }
+  .tools { margin-left: auto; display: flex; align-items: center; gap: 4px; font-family: "IBM Plex Mono", monospace; font-size: 11.5px; color: var(--mute); }
+  .tools button { padding: 3px 9px; border-radius: 5px; color: var(--mute); }
+  .tools button:hover { color: var(--ink); background: var(--surface-2); }
+  .tools button[aria-pressed="true"] { color: var(--ink); background: var(--surface-2); }
+  .tools .stat { padding-left: 8px; }
+  .tools .off { color: var(--crit); }
+
+  main { padding: 14px 20px 0; max-width: 1200px; }
+
+  /* ---- project rows ---- */
+  .rows { display: grid; gap: 1px; background: var(--line-soft); border: 1px solid var(--line-soft); border-radius: 8px; overflow: hidden; }
+  .row { background: var(--ground); }
+  .row > .line {
+    display: grid; grid-template-columns: 10px 42px 84px minmax(120px, 200px) 1fr auto;
+    align-items: center; gap: 12px; padding: 9px 14px; width: 100%; text-align: left;
+  }
+  .row > .line:hover { background: var(--surface); }
+  .dot { width: 7px; height: 7px; border-radius: 50%; background: var(--good); justify-self: center; }
+  .dot.needs_you, .dot.context { background: var(--warn); }
+  .dot.looping { background: var(--crit); }
+  .dot.idle, .dot.ended { background: var(--mute); opacity: .5; }
+  .dot.done { background: var(--good); }
+  .pct { font-family: "IBM Plex Mono", monospace; font-variant-numeric: tabular-nums; font-size: 14px; text-align: right; color: var(--ink); }
+  .pct.dim { color: var(--mute); font-size: 12px; }
+  .bar { height: 4px; background: var(--track); border-radius: 999px; overflow: hidden; }
+  .bar i { display: block; height: 100%; background: var(--accent); border-radius: 999px; transition: width .5s ease; }
+  .r-needs_you .bar i, .r-context .bar i { background: var(--warn); }
+  .r-looping .bar i { background: var(--crit); }
+  .r-done .bar i { background: var(--good); }
+  .r-idle .bar i, .r-ended .bar i { background: var(--mute); }
+  .name { font-weight: 500; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .now { color: var(--mute); font-size: 13px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .now.alert { color: var(--warn); }
+  .now.crit { color: var(--crit); }
+  .meta { display: flex; align-items: center; gap: 9px; font-family: "IBM Plex Mono", monospace; font-size: 11.5px; color: var(--mute); font-variant-numeric: tabular-nums; white-space: nowrap; }
+  .meta .b { color: var(--warn); } .meta .bc { color: var(--crit); } .meta .bi { color: var(--info); }
+  .caret { color: var(--mute); font-size: 10px; width: 8px; transition: transform .15s ease; }
+  .row.open .caret { transform: rotate(90deg); }
+
+  /* ---- expanded ---- */
+  .detail { display: none; padding: 4px 14px 14px 62px; background: var(--ground); border-top: 1px dashed var(--line-soft); }
+  .row.open .detail { display: block; }
+  .detail h5 { margin: 12px 0 6px; font-family: "IBM Plex Mono", monospace; font-size: 10.5px; letter-spacing: .07em; text-transform: uppercase; color: var(--mute); font-weight: 500; }
+  .detail h5:first-child { margin-top: 4px; }
+  .phases { display: flex; flex-wrap: wrap; gap: 5px; }
+  .ph { font-family: "IBM Plex Mono", monospace; font-size: 11.5px; padding: 2px 8px; border-radius: 4px; background: var(--surface-2); color: var(--ink-2); }
+  .ph.done { color: var(--good); } .ph.half { color: var(--warn); } .ph.todo { color: var(--mute); }
+  .open-items { display: grid; gap: 3px; font-size: 13px; color: var(--ink-2); }
+  .open-items div { display: flex; gap: 8px; }
+  .open-items .k { color: var(--mute); flex: none; }
+  .sess { display: grid; gap: 1px; }
+  .sess .s { display: grid; grid-template-columns: 8px 38px 1fr auto; align-items: center; gap: 10px; padding: 4px 0; font-size: 13px; }
+  .sess .s .t { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; color: var(--ink-2); }
+  .sess .s .n { color: var(--mute); font-size: 12px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .sess .s .m { font-family: "IBM Plex Mono", monospace; font-size: 11px; color: var(--mute); white-space: nowrap; }
+  .planline { font-family: "IBM Plex Mono", monospace; font-size: 11.5px; color: var(--mute); margin-top: 10px; }
+  .planline b { color: var(--ink-2); font-weight: 500; }
+  .planline.none { color: var(--warn); }
+
+  /* ---- cost panel ---- */
+  .panel { display: none; margin: 0 0 12px; border: 1px solid var(--line-soft); border-radius: 8px; background: var(--surface); overflow: hidden; }
+  .panel.on { display: block; }
+  .panel .tscroll { overflow-x: auto; padding: 10px 14px 2px; }
+  .panel table { border-collapse: collapse; font-family: "IBM Plex Mono", monospace; font-size: 12px; font-variant-numeric: tabular-nums; min-width: 400px; }
+  .panel th { text-align: right; font-weight: 500; color: var(--mute); padding: 4px 14px 6px 0; border-bottom: 1px solid var(--line-soft); white-space: nowrap; }
+  .panel th:first-child, .panel td:first-child { text-align: left; font-family: "IBM Plex Sans", sans-serif; color: var(--ink-2); }
+  .panel td { text-align: right; padding: 4px 14px 4px 0; color: var(--ink-2); }
+  .panel tr.total td { color: var(--ink); border-top: 1px solid var(--line); padding-top: 6px; }
+  .panel .note { margin: 6px 14px 10px; font-size: 11.5px; color: var(--mute); }
+
+  .empty { max-width: 52ch; margin: 70px auto; text-align: center; color: var(--mute); }
+  .empty b { color: var(--ink); font-weight: 600; display: block; font-size: 17px; margin-bottom: 6px; }
+  @media (prefers-reduced-motion: reduce) { .brand i { animation: none; } .bar i, .caret { transition: none; } }
+  @media (max-width: 760px) {
+    .row > .line { grid-template-columns: 10px 40px 60px 1fr auto; gap: 10px; }
+    .row > .line .now { display: none; }
+    .detail { padding-left: 20px; }
+  }
+</style>
+</head>
+<body>
+<header>
+  <div class="brand"><i></i>Pulse</div>
+  <div class="sum" id="sum">starting…</div>
+  <div class="tools">
+    <button id="btnCosts" aria-pressed="false">cost</button>
+    <button id="btnAll" aria-pressed="false">all</button>
+    <span class="stat" id="refresh">—</span>
+  </div>
+</header>
+<main>
+  <div class="panel" id="costs"><div class="tscroll"><table id="costsTable"></table></div>
+    <p class="note">API-equivalent. ≈ marks projects estimated from token counts rather than reported by Claude Code.</p>
+  </div>
+  <div class="rows" id="rows"></div>
+  <p class="empty" id="empty" hidden><b>Nothing running</b>Start a Claude session in any project. Its row appears here after the first reply.</p>
+</main>
+
+<script>
+(function () {
+  const $rows = document.getElementById('rows'), $sum = document.getElementById('sum');
+  const $refresh = document.getElementById('refresh'), $empty = document.getElementById('empty');
+  const $btnAll = document.getElementById('btnAll'), $btnCosts = document.getElementById('btnCosts');
+  const $costs = document.getElementById('costs'), $costsTable = document.getElementById('costsTable');
+
+  const open = new Set(); let showAll = false, showCosts = false;
+  const load = (k, d) => { try { const v = localStorage.getItem(k); return v === null ? d : JSON.parse(v); } catch { return d; } };
+  const save = (k, v) => { try { localStorage.setItem(k, JSON.stringify(v)); } catch {} };
+  (load('pulse.open', [])).forEach(x => open.add(x));
+  showAll = load('pulse.all', false); showCosts = load('pulse.costs', false);
+  const syncBtns = () => {
+    $btnAll.setAttribute('aria-pressed', showAll); $btnCosts.setAttribute('aria-pressed', showCosts);
+    $costs.classList.toggle('on', showCosts);
+  };
+  $btnAll.onclick = () => { showAll = !showAll; save('pulse.all', showAll); syncBtns(); render(); };
+  $btnCosts.onclick = () => { showCosts = !showCosts; save('pulse.costs', showCosts); syncBtns(); if (showCosts) costsTick(); };
+  syncBtns();
+
+  let data = null, lastOk = 0, failing = false;
+  const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+  const money = (v, est) => (est ? '≈' : '') + '$' + (Number(v) || 0).toFixed(2);
+  const ago = s => { s = Math.max(0, Math.round(s)); if (s < 60) return 'now'; if (s < 3600) return Math.floor(s / 60) + 'm'; if (s < 86400) return Math.floor(s / 3600) + 'h'; return Math.floor(s / 86400) + 'd'; };
+  const clip = (s, n) => { s = String(s || ''); return s.length > n ? s.slice(0, n - 1) + '…' : s; };
+
+  const noText = p => {
+    if (p.health === 'needs_you') return { t: 'waiting on you' + (p.health_detail ? ' — ' + p.health_detail : ''), c: 'alert' };
+    if (p.health === 'looping') return { t: p.health_detail || 'stuck in a loop', c: 'crit' };
+    if (p.health === 'context') return { t: p.health_detail || 'context nearly full', c: 'alert' };
+    if (p.health === 'idle' || p.health === 'ended') return { t: p.now || '', c: '' };
+    return { t: p.now || '', c: '' };
+  };
+
+  function phaseChips(list) {
+    return list.map(p => {
+      const cls = p.pct >= 100 ? 'done' : p.pct > 0 ? 'half' : 'todo';
+      const mark = p.pct >= 100 ? ' ✓' : p.pct > 0 ? ` ${p.pct}%` : '';
+      const cnt = p.total ? ` ${p.done}/${p.total}` : '';
+      return `<span class="ph ${cls}" title="${esc(p.name)}${cnt}">${esc(clip(p.name, 22))}${mark}</span>`;
+    }).join('');
+  }
+
+  function projectRow(p) {
+    const isOpen = open.has(p.root);
+    const n = noText(p);
+    const badges = [];
+    if (p.needs_you) badges.push(`<span class="b">⏸${p.needs_you}</span>`);
+    if (p.looping) badges.push(`<span class="bc">↻${p.looping}</span>`);
+    if (p.context) badges.push(`<span class="b">▮${p.context}</span>`);
+    if (p.subagents) badges.push(`<span class="bi">⚙${p.subagents}</span>`);
+    if (p.plan_behind) badges.push(`<span class="b" title="the chat's estimate is well ahead of what the plan has ticked">⚑</span>`);
+    const noPct = p.mode === 'explore' || p.mode === 'conversation';
+
+    const sessions = p.sessions.filter(s => showAll || !s.ended).map(s => `
+      <div class="s">
+        <span class="dot ${esc(s.health)}"></span>
+        <span class="pct ${s.mode === 'explore' || s.mode === 'conversation' ? 'dim' : ''} num">${s.mode === 'explore' || s.mode === 'conversation' ? '—' : s.overall + '%'}</span>
+        <span class="t" title="${esc(s.title || '')}">${esc(clip(s.goal || s.title || '—', 60))}</span>
+        <span class="m">${s.now ? esc(clip(s.now, 34)) + ' · ' : ''}${money(s.cost, s.cost_estimated)}${s.ended ? ' · ended' : ' · ' + ago(s.idle_s)}</span>
+      </div>`).join('');
+
+    return `
+<div class="row r-${esc(p.health)}${isOpen ? ' open' : ''}" data-root="${esc(p.root)}">
+  <button class="line" aria-expanded="${isOpen}">
+    <span class="dot ${esc(p.health)}"></span>
+    <span class="pct ${noPct ? 'dim' : ''}">${noPct ? '—' : p.pct + '%'}</span>
+    <span class="bar"><i style="width:${noPct ? 0 : Math.min(100, Math.max(0, p.pct))}%"></i></span>
+    <span class="name" title="${esc(p.root)}">${esc(p.name)}</span>
+    <span class="now ${n.c}">${esc(clip(n.t, 70))}</span>
+    <span class="meta">${badges.join(' ')}${badges.length ? ' ' : ''}${p.session_count > 1 ? p.session_count + ' chats' : '1 chat'} <span class="caret">▶</span></span>
+  </button>
+  <div class="detail">
+    ${p.phases && p.phases.length ? `<h5>${p.source === 'plan' ? 'plan phases' : 'phases (inferred from the chat)'}</h5><div class="phases">${phaseChips(p.phases)}</div>` : ''}
+    ${p.open && p.open.length ? `<h5>next up</h5><div class="open-items">${p.open.slice(0, 6).map(o => `<div><span class="k">○</span><span>${esc(o.text)}</span></div>`).join('')}</div>` : ''}
+    <h5>chats</h5><div class="sess">${sessions || '<div class="s"><span></span><span></span><span class="n">none active</span><span></span></div>'}</div>
+    <div class="planline ${p.plan_name ? '' : 'none'}">${p.plan_name
+      ? (p.plan_source === 'tasks'
+          ? `from <b>${esc(p.plan_name)}</b> tables — ${p.plan_counts.done} done · ${p.plan_counts.open} open${p.plan_counts.unrecognised ? ` · ${p.plan_counts.unrecognised} under a non-standard heading` : ''}`
+          : p.plan_countable
+            ? `from <b>${esc(p.plan_name)}</b> — ${p.plan_counts.done}${p.plan_counts.half ? `+${p.plan_counts.half}½` : ''} of ${p.plan_counts.total} outcomes ticked${p.plan_tasks ? ` · tasks ${p.plan_tasks.done} done, ${p.plan_tasks.open} open` : ''}`
+            : `<b>${esc(p.plan_name)}</b> found but not counted (${esc(p.plan_why)}) — showing the chat's estimate`)
+      : 'no plan file — <b>/pulse plan draft</b> writes one from the README, git log and docs'}${p.plan_behind ? ` · <span class="half" title="${esc(p.plan_behind_detail)}">⚑ plan behind the work</span>` : ''}</div>
+  </div>
+</div>`;
+  }
+
+  function render() {
+    if (!data) return;
+    const t = data.totals || {};
+    const projects = (data.projects || []).filter(p => showAll || (p.health !== 'ended' && p.idle_s < 12 * 3600));
+    const parts = [`<b>${t.live || 0}</b> live`];
+    if (t.needs_you) parts.push(`<span class="w"><b>${t.needs_you}</b> need you</span>`);
+    if (t.looping) parts.push(`<span class="c"><b>${t.looping}</b> looping</span>`);
+    if (t.context) parts.push(`<span class="w"><b>${t.context}</b> near limit</span>`);
+    parts.push(`<b>${money(t.cost_today, t.cost_estimated)}</b> today`);
+    $sum.innerHTML = parts.join(' · ');
+    $rows.innerHTML = projects.map(projectRow).join('');
+    $empty.hidden = projects.length > 0;
+    $rows.hidden = projects.length === 0;
+  }
+
+  $rows.addEventListener('click', e => {
+    const line = e.target.closest('.line'); if (!line) return;
+    const root = line.closest('.row').dataset.root;
+    if (open.has(root)) open.delete(root); else open.add(root);
+    save('pulse.open', [...open]); render();
+  });
+
+  async function tick() {
+    try {
+      const r = await fetch('/api/sessions', { cache: 'no-store' });
+      if (!r.ok) throw new Error(r.status);
+      data = await r.json(); lastOk = Date.now(); failing = false; render();
+    } catch { failing = true; }
+    $refresh.innerHTML = failing ? '<span class="off">● offline</span>' : `${ago((Date.now() - lastOk) / 1000)}`;
+  }
+
+  const dayLabel = (d, today) => d === today ? 'today' : new Date(d + 'T12:00:00').toLocaleDateString(undefined, { weekday: 'short' });
+  async function costsTick() {
+    if (!showCosts) return;
+    let c; try { c = await (await fetch('/api/costs', { cache: 'no-store' })).json(); } catch { return; }
+    const days = Object.keys(c.days).slice(0, 7), projects = new Map();
+    for (const d of days) for (const [p, v] of Object.entries(c.days[d])) {
+      const row = projects.get(p) || projects.set(p, { by: {}, total: 0, est: false }).get(p);
+      row.by[d] = v.cost; row.total += v.cost; row.est = row.est || v.est;
+    }
+    const rows = [...projects.entries()].sort((a, b) => (b[1].by[c.today] || 0) - (a[1].by[c.today] || 0) || b[1].total - a[1].total);
+    const colTotals = days.map(d => rows.reduce((n, [, r]) => n + (r.by[d] || 0), 0));
+    const fmt = v => v ? '$' + v.toFixed(2) : '<span style="color:var(--mute)">·</span>';
+    $costsTable.innerHTML = `<tr><th>project</th>${days.map(d => `<th>${dayLabel(d, c.today)}</th>`).join('')}<th>7d</th></tr>` +
+      rows.map(([p, r]) => `<tr><td>${esc(p)}${r.est ? ' <span style="color:var(--mute)">≈</span>' : ''}</td>${days.map(d => `<td>${fmt(r.by[d])}</td>`).join('')}<td>${fmt(r.total)}</td></tr>`).join('') +
+      (rows.length ? `<tr class="total"><td>all</td>${colTotals.map(v => `<td>${fmt(v)}</td>`).join('')}<td>${fmt(colTotals.reduce((a, b) => a + b, 0))}</td></tr>` : '');
+  }
+
+  tick(); costsTick();
+  setInterval(tick, 2000); setInterval(costsTick, 20000);
+  document.addEventListener('visibilitychange', () => { if (!document.hidden) { tick(); costsTick(); } });
+})();
+</script>
+</body>
+</html>
