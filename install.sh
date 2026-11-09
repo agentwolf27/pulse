@@ -61,8 +61,11 @@ for s in "$HERE"/skills/*/; do n=$(basename "$s"); mkdir -p "$HOME/.claude/skill
 # the PLAN.md template every new project is seeded from — edit it in the repo, it is yours
 ln -sfn "$HERE/templates" "$PULSE_HOME/templates"
 
-# menu bar: the SwiftBar/xbar plugin folder is ~/.claude/pulse/menubar
-ln -sfn "$HERE/menubar" "$PULSE_HOME/menubar"
+# menu bar: the SwiftBar/xbar plugin folder is ~/.claude/pulse/menubar. If that is already a real
+# folder (an older install, or one made by hand), leave it: `ln -sfn` would put a second
+# `menubar` link inside it, and SwiftBar would show Pulse twice. The plugin is linked into it below.
+[ -d "$PULSE_HOME/menubar" ] && [ ! -L "$PULSE_HOME/menubar" ] || ln -sfn "$HERE/menubar" "$PULSE_HOME/menubar"
+[ -L "$PULSE_HOME/menubar/menubar" ] && rm -f "$PULSE_HOME/menubar/menubar"   # left by earlier installs that hit the case above
 chmod +x "$HERE"/menubar/*.sh
 menubar_note="not installed — brew install --cask swiftbar, then pick $PULSE_HOME/menubar as its plugin folder"
 # PULSE_MENUBAR_OFF=1 skips SwiftBar entirely (its preferences are per-user, not per-$HOME).
