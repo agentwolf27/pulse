@@ -56,14 +56,14 @@ if [ -z "$sid" ] || [ ! -f "$state" ]; then
 fi
 
 # --- one read of the state file --------------------------------------------
-IFS=$'\x1f' read -r overall source goal now hstate hdetail done total ip edits commits tests_pass mode phases scope subagents ctx_est behind < <(jq -r '
+IFS=$'\x1f' read -r overall source goal now hstate hdetail done total ip edits commits tests_pass mode phases scope subagents ctx_est behind wkind wat stale tp < <(jq -r '
   def clip(n): gsub("[\t\n\r]+"; " ") | if length > n then .[0:n-1] + "…" else . end;
   [ (.overall // 0),
     (.source // "heuristic"),
     ((.goal // .title // .last_prompt // .project // "") | clip(40)),
     ((.now // "") | clip(48)),
     (.health.state // "active"),
-    ((.health.detail // "") | clip(40)),
+    ((.health.detail // "") | clip(72)),
     ([ .checklist[]? | select(.done) ] | length),
     (.checklist | length),
     ([ .checklist[]? | select(.status == "in_progress") ] | length),
@@ -73,9 +73,26 @@ IFS=$'\x1f' read -r overall source goal now hstate hdetail done total ip edits c
     (if .scope_changed then "1" else "0" end),
     (.subagents // 0),
     (.ctx_pct_est // ""),
-    (if .plan_behind then "1" else "0" end)
+    (if .plan_behind then "1" else "0" end),
+    (.waiting_on_you.kind // ""),
+    (.waiting_on_you.at // "" | try fromdateiso8601 catch 0),
+    # the goal card predates the latest reply by 3+ minutes: say how old it is
+    ((.analyzed_at // "" | try fromdateiso8601 catch 0) as $a | (.stopped_at // "" | try fromdateiso8601 catch 0) as $s
+     | if (.ended | not) and $a > 0 and $s - $a > 180 then ((now - $a) / 60 | floor | if . < 1 then 1 else . end) else "" end),
+    (.transcript_path // "")
   ] | map(tostring) | join("")' "$state" 2>/dev/null)
 [ -z "${overall:-}" ] && overall=0
+
+# a permission prompt counts as answered once the transcript has moved on past it
+if [ "$hstate" = "needs_you" ] && { [ "$wkind" = "permission" ] || [ "$wkind" = "form" ]; } && [ -n "$tp" ]; then
+  tmt=$(stat -f %m "$tp" 2>/dev/null || stat -c %Y "$tp" 2>/dev/null)
+  if [ -n "$tmt" ] && [ "$tmt" -gt $(( ${wat%.*} + 2 )) ] 2>/dev/null; then hstate=active; hdetail=""; fi
+fi
+# the analyser's own health: paused after a sign-in or usage-limit error
+aipaused=""
+if [ -f "$PULSE_HOME/ai-paused.json" ]; then
+  aipaused=$(jq -r 'select(.reason) | "\(.reason) — \(.fix // "")" | gsub("[\t\n\r]+"; " ") | .[0:72]' "$PULSE_HOME/ai-paused.json" 2>/dev/null)
+fi
 
 # sub-agents, and a context estimate when the statusline input gave nothing exact
 [ "${subagents:-0}" -gt 0 ] 2>/dev/null && right="${right%$R} ${MUTE}· ⚙ ${subagents}${R}"
@@ -110,6 +127,7 @@ else
 fi
 [ "$scope" = "1" ] && now="↗ scope grew · $now"
 [ "${behind:-0}" = "1" ] && now="${WARN}⚑ plan behind${R} · $now"
+[ -n "${stale:-}" ] && now="${MUTE}◷ card ${stale}m old${R}${now:+ · $now}"
 
 # --- line 2: breakdown · now ------------------------------------------------
 if [ -n "$phases" ]; then
@@ -131,7 +149,12 @@ else
   [ "${tests_pass:-0}" -gt 0 ] && left="$left · ${tests_pass} tests green"
   left="$left${R}"
 fi
-if [ -n "$now" ]; then
+if [ "$hstate" = "needs_you" ] && [ -n "$hdetail" ]; then
+  # what exactly it is waiting on: the question, or the permission it needs
+  printf '%s   %s›%s %s⏸ %s%s\n' "$left" "$MUTE" "$R" "$WARN" "$hdetail" "$R"
+elif [ -n "$aipaused" ]; then
+  printf '%s   %s›%s %s⚠ AI paused · %s%s%s\n' "$left" "$MUTE" "$R" "$WARN" "$aipaused" "$R" "${stale:+ ${MUTE}· ◷ card ${stale}m old${R}}"
+elif [ -n "$now" ]; then
   printf '%s   %s›%s %snow:%s %s\n' "$left" "$MUTE" "$R" "$MUTE" "$R" "$now"
 elif [ -n "$hdetail" ]; then
   printf '%s   %s› %s%s\n' "$left" "$MUTE" "$hdetail" "$R"

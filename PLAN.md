@@ -70,6 +70,23 @@ and how far along it is — in the statusline, the menu bar, and one dashboard.
 - [x] The eleven-line house rule in `~/.claude/CLAUDE.md` — `grep -q '^# House workflow' ~/.claude/CLAUDE.md`
 - [x] Nudge uses Stop `additionalContext`, not `decision: block` — `grep -q 'hookEventName: "Stop"' ~/.claude/pulse/bin/pulse-hook`
 
+## AI quality (draft)
+
+> **Draft, 2026-11-09. Items 0–2 built 2026-11-09 (branch `ai-health-needs-you`); 3–6 not approved yet.** Proposed after reading two months of the analyser's own log and state files. Findings: 17% of analyser runs failed on an expired sign-in with nothing shown; "needs you" fires only on AskUserQuestion; goals stop following long chats; 25 of 35 chats at 100% got there on Claude's word alone; plan-tracked chats show "Done looks like" as their only phase; blockers are found but never displayed. Numbers match the mockup; the replay harness is step 0. The number still comes from PLAN.md ticks first, and `/verify` is unchanged.
+
+- [x] 0 · A replay harness runs saved chats through compress, prompt and merge with recorded model answers, with no network calls — `node lib/eval.js --baseline`
+- [x] 1 · When the analyser's sign-in expires or it hits a limit, it backs off 10 minutes, all three views say "AI paused" with the fix, and a card older than the latest reply is marked stale — `node lib/eval.js --suite health`
+- [x] 2 · A permission prompt or a closing question in Claude's reply flags the chat as waiting on you, and the question text is shown — `node lib/eval.js --suite needs-you`
+- [x] 2 · Blockers the analyser already finds are shown on the dashboard — `grep -q 'class="blockers"' lib/dash.html`
+- [ ] 3 · Every % names its source; an AI estimate rises at most 25 points per update and reaches 100% only with evidence (a test run, a commit, or all todos done) — `node lib/eval.js --suite number`
+- [ ] 3 · Talk-only chats show no % anywhere, the menu bar's chat lines included — `node lib/eval.js --suite modes`
+- [ ] 4 · The goal follows the chat: a scope change updates it, the old goal is kept as history, and it stays at 12 words or fewer — `node lib/eval.js --suite goal`
+- [ ] 5 · Plan headings with no checkboxes stop showing as phases, and a single "Done looks like" list is grouped into 3–5 display-only stages; the % stays ticked ÷ total — `node lib/eval.js --suite phases`
+- [ ] 6 · At least 40% fewer analyser calls on the replay set, with the median update lag no worse than today's — `node lib/eval.js --suite cost`
+- [ ] 6 · The dashboard shows the analyser's own spend apart from the chats' spend — `grep -q 'data-ai-spend' lib/dash.html`
+- [ ] Decide whether the API path moves from Haiku 4.5 to Haiku 5.5, once the replay shows how they compare
+- [ ] Bring the installed copy in line with this repo before building: six files differ in wording, the analyser files match
+
 ## Still open
 
 - [ ] Decide whether a chat should show its own progress or its project's when they differ
