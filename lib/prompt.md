@@ -24,7 +24,7 @@ Return only a JSON object with exactly these keys:
 
 Rules:
 1. Keep the GOAL CARD's goal and phase names unless the person clearly changed direction. Check the LATEST REQUEST: if it asks for work the goal does not cover, or the recent turns are about something else entirely, that is a change of direction — set scope_changed to true and write a new card whose goal says what they want now. Small additions, follow-ups and answers like "yes" are not a change of direction.
-2. 3 to 6 phases, in the order the work happens. Weight is how much of the whole each phase is (1 small … 5 large).
+2. 3 to 6 phases, in the order the work happens. Name each phase for an outcome the person would recognise ("Cart page", "Tests pass"), never an activity ("Implementation", "Testing"). Weight is how much of the whole each phase is (1 small … 5 large).
 3. pct is how much of that phase is done. Never lower a phase unless work was undone. Be conservative: unverified work is not finished work. Tests passing count for a lot.
 4. mode: "build" makes something new, "fix" repairs something, "explore" is reading and understanding with no deliverable yet, "conversation" is questions and answers with nothing being made.
 5. "now" describes the most recent activity, not the goal. If Claude asked the person a question and is waiting, say so.
