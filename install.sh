@@ -1,6 +1,6 @@
 #!/bin/bash
 # Pulse — installer.
-# Backs up ~/.claude/settings.json, merges in the statusline + six hooks (never
+# Backs up ~/.claude/settings.json, merges in the statusline + the hooks (never
 # touching your other keys), and symlinks ~/.claude/pulse/bin to this folder so
 # a checkout path with spaces or colons never appears in a config string.
 set -euo pipefail
@@ -39,6 +39,9 @@ jq --arg h "$HOOK" --arg s "$STATUS" '
   | ensure("UserPromptSubmit"; null)
   | ensure("PostToolUse"; "TodoWrite")
   | ensure("PostToolUse"; "Edit|Write|MultiEdit")
+  | ensure("PreToolUse"; "AskUserQuestion")
+  | ensure("PostToolUse"; "AskUserQuestion")
+  | ensure("Notification"; "permission_prompt|elicitation_dialog")
   | ensure("Stop"; null)
   | ensure("PreCompact"; null)
   | ensure("SessionEnd"; null)
@@ -92,7 +95,7 @@ fi
 
 echo "installed"
 echo "  statusline : $STATUS"
-echo "  hooks      : SessionStart · UserPromptSubmit · PostToolUse(TodoWrite) · Stop · PreCompact · SessionEnd → $HOOK"
+echo "  hooks      : SessionStart · UserPromptSubmit · Pre/PostToolUse(TodoWrite, edits, AskUserQuestion) · Notification(permission) · Stop · PreCompact · SessionEnd → $HOOK"
 echo "  dashboard  : $dash_url   (pulse-dash open · pulse-dash stop)"
 echo "  commands   : /pulse · /pulse-review · /plan-md · /verify · /state · /handoff · /decision   (~/.claude/commands)"
 echo "  skills     : house-files · plan-together   (~/.claude/skills)"

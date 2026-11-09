@@ -1,8 +1,9 @@
 #!/bin/bash
 # Pulse — hook dispatcher.
 #
-# Claude Code runs this on SessionStart, UserPromptSubmit, PostToolUse(TodoWrite),
-# Stop, PreCompact and SessionEnd, piping the hook JSON on stdin. It updates the
+# Claude Code runs this on SessionStart, UserPromptSubmit, PreToolUse/PostToolUse
+# (TodoWrite, edits, AskUserQuestion), Notification (permission prompts), Stop,
+# PreCompact and SessionEnd, piping the hook JSON on stdin. It updates the
 # session's state file (~/.claude/pulse/state/<session_id>.json) and exits fast.
 # It never blocks Claude: no network, no LLM, exit 0 always.
 #
@@ -126,9 +127,13 @@ scan_transcript() {
                       { name,
                         human: (.name == "Bash" and .input.description != null),
                         arg: ((if .name == "Bash" then (.input.description // ((.input.command // "") | split("\n") | first))
+                               elif .name == "AskUserQuestion" then (.input.questions[0].question // "")
                                else (.input.file_path // .input.query // .input.pattern // .input.description // "") end)
-                              | tostring | .[0:80]) } end),
+                              | tostring | .[0:160]) } end),
         last_text:  (texts | last | if . == null then null else .[0:300] end),
+        # the end of the reply, when it ended with text rather than a tool call
+        last_tail:  ([ .[] | select(.type=="assistant") | .message.content[]? ] | last
+                     | if . != null and .type == "text" then (.text | .[-600:]) else null end),
         replies:    ([ .[] | select(.type=="assistant") ] | length),
         # one message can span several records — count its usage once
         usage:      ([ .[] | select(.type=="assistant" and .message.usage != null) | { id: (.message.id // .uuid), u: .message.usage } ]
@@ -180,17 +185,34 @@ scan_transcript() {
     | .ctx_tokens  = ($s.ctx_tokens // .ctx_tokens)
     # window: 1M if the default model is a [1m] variant or the session is already past 200k, else 200k
     | .ctx_pct_est = (if .ctx_tokens then ((.ctx_tokens / (if $onem or .ctx_tokens > 190000 then 1000000 else 200000 end)) * 100 | floor) else null end)
+    # a closing question: the last line asks something, or the last question is followed only by a list of options
+    | (if $s.last_tail == null then null else
+         ($s.last_tail | gsub("\r"; "") | split("\n") | map(gsub("^\\s+|\\s+$"; "")) | map(select(length > 0))
+          | map(gsub("^[*_`\"\u0027(\\[]+"; "") | gsub("[*_`\"\u0027)\\]]+$"; ""))) as $ls
+         | ([ range(0; $ls | length) | select($ls[.] | endswith("?")) ] | last) as $qi
+         | if $qi == null then null
+           elif ([ $ls[$qi + 1:][] | select(test("^([-*•]|[0-9]+[.)]|[A-Za-z][.)])\\s") | not) ] | length) > 0 then null
+           else ($ls[$qi] | (capture("(?<q>[^.!?]*[?]+)$").q // .) | gsub("^\\s+"; "") | .[0:160]) end
+       end) as $closing
     # one health state, by priority: needs you › looping › context › (done, set elsewhere) › active
-    | .health = (if ($s.last_tool.name // "") == "AskUserQuestion"
-                 then { state: "needs_you", detail: "asked you a question" }
+    | .health = (if ($s.last_tool.name // "") == "AskUserQuestion" and $s.last_tail == null
+                 then { state: "needs_you", detail: (if ($s.last_tool.arg // "") != "" then "asked: \($s.last_tool.arg)" else "asked you a question" end) }
+                 elif $closing != null and ($closing | length) > 3
+                 then { state: "needs_you", detail: "asked: \($closing)" }
                  elif $rep >= 3 then { state: "looping", detail: "same \($loopname) call failed ×\($rep)" }
                  elif $reperr != "" then { state: "looping", detail: "same error ×3: \($reperr | .[0:48])" }
                  elif (.ctx_pct_est // 0) >= 90 and (.health.state | IN("active", "context", "needs_you", "looping"))
                  then { state: "context", detail: "context \(.ctx_pct_est)% full" }
                  elif (.health.state | IN("needs_you", "looping", "context")) then { state: "active", detail: "" }
                  else .health end)
+    # what exactly the chat is waiting on — the renderers show its text; cleared on the next prompt
+    | .waiting_on_you = (if .health.state == "needs_you"
+                         then { kind: (if $closing != null and ($s.last_tool.name // "") != "AskUserQuestion" then "reply" else "ask" end),
+                                text: (.health.detail | sub("^asked: "; "")), at: $ts }
+                         else null end)
     # "now": an in-progress todo wins; otherwise describe the last tool call; otherwise the last sentence.
     | .now = (if .source == "todos" and .now != null then .now
+              elif .waiting_on_you != null then "waiting for your answer"
               elif $s.last_tool != null then
                 (if $s.last_tool.name == "Bash" then
                    (if $s.last_tool.human then ($s.last_tool.arg | .[0:1] | ascii_downcase) + ($s.last_tool.arg | .[1:80])
@@ -258,8 +280,53 @@ case "$ev" in
       | (if (.health.state | IN("needs_you", "looping", "context", "done")) then .health = { state: "active", detail: "" } else . end)
       | (if .health.state == "looping" or .recent_calls != null then .recent_calls = [] | .recent_errors = [] else . end)
       | (if .now == "waiting for your answer" then .now = "reading your reply" else . end)
+      | .waiting_on_you = null
       | .user_at = $ts | .updated_at = $ts
     ' --arg p "$prompt" --arg ts "$ts"
+    ;;
+
+  PreToolUse)
+    # Only AskUserQuestion is routed here: the dialog blocks, so this is the moment the chat
+    # starts waiting on you. Nothing is printed — the hook never takes a permission decision.
+    [ -f "$state" ] || init_state
+    tool=$(printf '%s' "$input" | jq -r '.tool_name // ""')
+    if [ "$tool" = "AskUserQuestion" ]; then
+      q=$(printf '%s' "$input" | jq -r '(.tool_input.questions[0].question // "") | gsub("[\n\r\t]+"; " ") | .[0:160]')
+      prev_health=$(jq -r '.health.state // "active"' "$state")
+      merge '
+        .health = { state: "needs_you", detail: (if $q != "" then "asked: \($q)" else "asked you a question" end) }
+        | .waiting_on_you = { kind: "ask", text: $q, at: $ts }
+        | .now = "waiting for your answer" | .updated_at = $ts
+      ' --arg q "$q" --arg ts "$ts"
+      notify_transition "$prev_health"
+      log "waiting: question"
+    fi
+    ;;
+
+  Notification)
+    # A permission prompt or an MCP form left open: the chat is blocked on you right now.
+    # idle_prompt and the rest are ignored — Stop already covers "Claude finished".
+    [ -f "$state" ] || init_state
+    IFS=$'\x1f' read -r ntype nmsg < <(printf '%s' "$input" | jq -r '[(.notification_type // ""), ((.message // "") | gsub("[\n\r\t]+"; " ") | .[0:160])] | join("\u001f")')
+    if [ -z "$ntype" ]; then case "$nmsg" in *ermission*) ntype=permission_prompt ;; esac; fi
+    case "$ntype" in
+      permission_prompt|elicitation_dialog)
+        [ "$ntype" = "permission_prompt" ] && kind=permission || kind=form
+        prev_health=$(jq -r '.health.state // "active"' "$state")
+        merge '
+          # an open AskUserQuestion dialog says more than "needs your permission" — keep it
+          if (.waiting_on_you.kind // "") == "ask" then .updated_at = $ts
+          else
+            ($m | sub("^Claude (needs|is waiting for) your "; "") | if . == "" then (if $k == "permission" then "permission needed" else "a form is waiting for you" end) else . end) as $d
+            | .health = { state: "needs_you", detail: $d }
+            | .waiting_on_you = { kind: $k, text: $d, at: $ts }
+            | .updated_at = $ts
+          end
+        ' --arg m "$nmsg" --arg k "$kind" --arg ts "$ts"
+        notify_transition "$prev_health"
+        log "waiting: $ntype"
+        ;;
+    esac
     ;;
 
   PostToolUse)
@@ -285,6 +352,14 @@ case "$ev" in
       ' --argjson todos "$todos" --arg ts "$ts"
       notify_transition "$prev_health"
       log "todos $(jq -r 'length' <<<"$todos") overall=$(jq -r .overall "$state")"
+    elif [ "$tool" = "AskUserQuestion" ]; then
+      merge '
+        (if .health.state == "needs_you" then .health = { state: "active", detail: "" } else . end)
+        | .waiting_on_you = null
+        | (if .now == "waiting for your answer" then .now = "reading your reply" else . end)
+        | .updated_at = $ts
+      ' --arg ts "$ts"
+      log "answered"
     elif [ "$tool" = "Edit" ] || [ "$tool" = "Write" ] || [ "$tool" = "MultiEdit" ]; then
       # Tick-guard: Claude just edited a plan file. If it ticked an outcome, run that outcome's
       # VERIFY now and, when the check fails, say so in-turn. Pulse never unticks — it refuses to believe.

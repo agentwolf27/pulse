@@ -100,6 +100,15 @@
   .sess .s .t { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; color: var(--ink-2); }
   .sess .s .n { color: var(--mute); font-size: 12px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
   .sess .s .m { font-family: "IBM Plex Mono", monospace; font-size: 11px; color: var(--mute); white-space: nowrap; }
+  .blockers { display: grid; gap: 3px; font-size: 13px; color: var(--warn); }
+  .blockers div { display: flex; gap: 8px; }
+  .blockers .k { flex: none; }
+  .meta .stale { color: var(--mute); border: 1px dashed var(--line-soft); border-radius: 4px; padding: 0 4px; }
+  .ai-banner { display: flex; flex-wrap: wrap; gap: 4px 12px; align-items: baseline; margin: 0 0 12px; padding: 10px 14px;
+               border: 1px solid var(--warn); border-radius: 8px; color: var(--warn); font-size: 13px; }
+  .ai-banner b { font-weight: 600; }
+  .ai-banner .fix { color: var(--ink-2); font-family: "IBM Plex Mono", monospace; font-size: 12px; }
+  .ai-banner[hidden] { display: none; }
   .planline { font-family: "IBM Plex Mono", monospace; font-size: 11.5px; color: var(--mute); margin-top: 10px; }
   .planline b { color: var(--ink-2); font-weight: 500; }
   .planline.none { color: var(--warn); }
@@ -136,6 +145,7 @@
   </div>
 </header>
 <main>
+  <div class="ai-banner" id="ai" role="status" hidden></div>
   <div class="panel" id="costs"><div class="tscroll"><table id="costsTable"></table></div>
     <p class="note">API-equivalent. ≈ marks projects estimated from token counts rather than reported by Claude Code.</p>
   </div>
@@ -149,6 +159,7 @@
   const $refresh = document.getElementById('refresh'), $empty = document.getElementById('empty');
   const $btnAll = document.getElementById('btnAll'), $btnCosts = document.getElementById('btnCosts');
   const $costs = document.getElementById('costs'), $costsTable = document.getElementById('costsTable');
+  const $ai = document.getElementById('ai');
 
   const open = new Set(); let showAll = false, showCosts = false;
   const load = (k, d) => { try { const v = localStorage.getItem(k); return v === null ? d : JSON.parse(v); } catch { return d; } };
@@ -195,6 +206,7 @@
     if (p.context) badges.push(`<span class="b">▮${p.context}</span>`);
     if (p.subagents) badges.push(`<span class="bi">⚙${p.subagents}</span>`);
     if (p.plan_behind) badges.push(`<span class="b" title="the chat's estimate is well ahead of what the plan has ticked">⚑</span>`);
+    if (p.stale) badges.push(`<span class="stale" title="the goal card predates the latest reply — the analyser has not caught up">◷ card ${p.stale_min}m old</span>`);
     const noPct = p.mode === 'explore' || p.mode === 'conversation';
 
     const sessions = p.sessions.filter(s => showAll || !s.ended).map(s => `
@@ -202,7 +214,7 @@
         <span class="dot ${esc(s.health)}"></span>
         <span class="pct ${s.mode === 'explore' || s.mode === 'conversation' ? 'dim' : ''} num">${s.mode === 'explore' || s.mode === 'conversation' ? '—' : s.overall + '%'}</span>
         <span class="t" title="${esc(s.title || '')}">${esc(clip(s.goal || s.title || '—', 60))}</span>
-        <span class="m">${s.now ? esc(clip(s.now, 34)) + ' · ' : ''}${money(s.cost, s.cost_estimated)}${s.ended ? ' · ended' : ' · ' + ago(s.idle_s)}</span>
+        <span class="m">${s.health === 'needs_you' && s.health_detail ? '⏸ ' + esc(clip(s.health_detail, 40)) + ' · ' : s.now ? esc(clip(s.now, 34)) + ' · ' : ''}${money(s.cost, s.cost_estimated)}${s.ended ? ' · ended' : ' · ' + ago(s.idle_s)}</span>
       </div>`).join('');
 
     return `
@@ -216,6 +228,7 @@
     <span class="meta">${badges.join(' ')}${badges.length ? ' ' : ''}${p.session_count > 1 ? p.session_count + ' chats' : '1 chat'} <span class="caret">▶</span></span>
   </button>
   <div class="detail">
+    ${p.blockers && p.blockers.length ? `<h5>blockers</h5><div class="blockers">${p.blockers.map(b => `<div><span class="k">⚠</span><span>${esc(b)}</span></div>`).join('')}</div>` : ''}
     ${p.phases && p.phases.length ? `<h5>${p.source === 'plan' ? 'plan phases' : 'phases (inferred from the chat)'}</h5><div class="phases">${phaseChips(p.phases)}</div>` : ''}
     ${p.open && p.open.length ? `<h5>next up</h5><div class="open-items">${p.open.slice(0, 6).map(o => `<div><span class="k">○</span><span>${esc(o.text)}</span></div>`).join('')}</div>` : ''}
     <h5>chats</h5><div class="sess">${sessions || '<div class="s"><span></span><span></span><span class="n">none active</span><span></span></div>'}</div>
@@ -240,6 +253,11 @@
     if (t.context) parts.push(`<span class="w"><b>${t.context}</b> near limit</span>`);
     parts.push(`<b>${money(t.cost_today, t.cost_estimated)}</b> today`);
     $sum.innerHTML = parts.join(' · ');
+    const ai = data.ai || {};
+    $ai.hidden = ai.state !== 'paused';
+    if (ai.state === 'paused') {
+      $ai.innerHTML = `<b>⚠ AI paused</b><span>${esc(ai.reason)} — goal cards are not updating</span>${ai.fix ? `<span class="fix">fix: ${esc(ai.fix)}</span>` : ''}`;
+    }
     $rows.innerHTML = projects.map(projectRow).join('');
     $empty.hidden = projects.length > 0;
     $rows.hidden = projects.length === 0;
