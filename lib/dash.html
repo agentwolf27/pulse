@@ -45,6 +45,7 @@
   .sum { font-family: "IBM Plex Mono", monospace; font-size: 12px; color: var(--mute); font-variant-numeric: tabular-nums; }
   .sum b { color: var(--ink-2); font-weight: 500; }
   .sum .w { color: var(--warn); } .sum .c { color: var(--crit); }
+  .sum .spend { white-space: nowrap; }
   .tools { margin-left: auto; display: flex; align-items: center; gap: 4px; font-family: "IBM Plex Mono", monospace; font-size: 11.5px; color: var(--mute); }
   .tools button { padding: 3px 9px; border-radius: 5px; color: var(--mute); }
   .tools button:hover { color: var(--ink); background: var(--surface-2); }
@@ -241,7 +242,7 @@
   </button>
   <div class="detail">
     ${p.blockers && p.blockers.length ? `<h5>blockers</h5><div class="blockers">${p.blockers.map(b => `<div><span class="k">⚠</span><span>${esc(b)}</span></div>`).join('')}</div>` : ''}
-    ${p.phases && p.phases.length ? `<h5>${p.source === 'plan' ? 'plan phases' : 'phases (inferred from the chat)'}</h5><div class="phases">${phaseChips(p.phases)}</div>` : ''}
+    ${p.phases && p.phases.length ? `<h5>${p.phases.some(x => x.stage) ? `plan stages <span data-staged title="One list in the plan, grouped into stages by Pulse's AI for display. The % is still ticked ÷ total.">· grouped by AI${p.plan_counts && p.plan_counts.total ? `, still ${p.plan_counts.done} of ${p.plan_counts.total} ticked = ${p.pct}%` : ''}</span>` : p.source === 'plan' ? 'plan phases' : 'phases (inferred from the chat)'}</h5><div class="phases">${phaseChips(p.phases)}</div>` : ''}
     ${p.open && p.open.length ? `<h5>next up</h5><div class="open-items">${p.open.slice(0, 6).map(o => `<div><span class="k">○</span><span>${esc(o.text)}</span></div>`).join('')}</div>` : ''}
     <h5>chats</h5><div class="sess">${sessions || '<div class="s"><span></span><span></span><span class="n">none active</span><span></span></div>'}</div>
     <div class="planline ${p.plan_name ? '' : 'none'}">${p.plan_name
@@ -264,6 +265,9 @@
     if (t.looping) parts.push(`<span class="c"><b>${t.looping}</b> looping</span>`);
     if (t.context) parts.push(`<span class="w"><b>${t.context}</b> near limit</span>`);
     parts.push(`<b>${money(t.cost_today, t.cost_estimated)}</b> today`);
+    // the analyser's own spend, never mixed into the chats' cost above
+    const sp = t.ai || {};
+    if (sp.calls || sp.skipped) parts.push(`<span class="spend" data-ai-spend title="What Pulse's own analyser has used across the chats on file. Not part of the chats' cost. Skipped = replies that only read or searched, so no call was made.">Pulse's own AI: <b>${sp.calls}</b> calls, <b>${sp.skipped}</b> skipped · ${money(sp.cost)}</span>`);
     $sum.innerHTML = parts.join(' · ');
     const ai = data.ai || {};
     $ai.hidden = ai.state !== 'paused';
