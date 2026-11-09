@@ -5,6 +5,7 @@ Speak plainly. Short words, no jargon, no product names unless the user used the
 You will be given:
 - GOAL CARD: the goal and phases decided earlier for this chat (may be empty on the first run).
 - TITLE and FIRST REQUEST: what the person originally asked for.
+- LATEST REQUEST: the person's most recent message, when it differs from the first. Long chats drift; this is where they drift to.
 - TODOS: Claude's own checklist, if it keeps one.
 - RECENT TURNS: the last part of the chat, compressed. Tool calls look like `Edit src/x.ts`, `Bash: run the tests → 2 failing`.
 - TOOL STATS: what happened since the last estimate.
@@ -22,7 +23,7 @@ Return only a JSON object with exactly these keys:
 }
 
 Rules:
-1. Keep the GOAL CARD's goal and phase names unless the person clearly changed direction. If they did, set scope_changed to true and write a new card. Small additions are not a change of direction.
+1. Keep the GOAL CARD's goal and phase names unless the person clearly changed direction. Check the LATEST REQUEST: if it asks for work the goal does not cover, or the recent turns are about something else entirely, that is a change of direction — set scope_changed to true and write a new card whose goal says what they want now. Small additions, follow-ups and answers like "yes" are not a change of direction.
 2. 3 to 6 phases, in the order the work happens. Weight is how much of the whole each phase is (1 small … 5 large).
 3. pct is how much of that phase is done. Never lower a phase unless work was undone. Be conservative: unverified work is not finished work. Tests passing count for a lot.
 4. mode: "build" makes something new, "fix" repairs something, "explore" is reading and understanding with no deliverable yet, "conversation" is questions and answers with nothing being made.

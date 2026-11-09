@@ -48,14 +48,16 @@ printf '%s' "$json" | jq -r --arg url "$URL" '
   def col:  if .health == "needs_you" or .health == "context" then "#F0B44C" elif .health == "looping" then "#F2646D" elif .health == "done" then "#4FC98C" elif .health == "idle" or .health == "ended" then "#78818F" else "#4FC98C" end;
   def pct:  if .mode == "explore" or .mode == "conversation" then "  — " else ((.pct | tostring) | if length < 3 then (" " * (3 - length)) + . else . end) + "%" end;
   def clip(n): if length > n then .[0:n-1] + "…" else . end;
+  def talk: .mode == "explore" or .mode == "conversation";
+  def src:  if .source == "plan" then "plan" elif .source == "todos" then "todos" elif .source == "llm" then "AI est" else "rough" end;
   .projects[] | select(.health != "ended") | select(.idle_s < 43200)
   | "\(mark) \(pct)  \(.name | clip(22)) | href=\($url) color=\(col) font=Menlo size=13",
     "--\(if .health == "needs_you" then "waiting on you" + (if (.health_detail // "") != "" then " — " + (.health_detail | clip(46)) else "" end) elif .health == "looping" then "stuck: " + (.health_detail | clip(48)) elif .now != "" then .now | clip(52) else "—" end) | font=Menlo size=11 color=#A8AEBB",
     (if (.phases | length) > 0 then "--" + ([.phases[] | "\(.name | clip(18)) \(if .pct >= 100 then "✓" else (.pct|tostring) + "%" end)"] | join("  ")) + " | font=Menlo size=11 color=#78818F" else empty end),
     (if .plan_source == "tasks" then "--\(.plan_name) tables: \(.plan_counts.done) done · \(.plan_counts.open) open · \(.session_count) chat\(if .session_count == 1 then "" else "s" end)\(if .plan_behind then " · ⚑ plan behind" else "" end) | font=Menlo size=11 color=#78818F"
      elif .plan_countable then "--\(.plan_name): \(.plan_counts.done)/\(.plan_counts.total) ticked · \(.session_count) chat\(if .session_count == 1 then "" else "s" end)\(if .plan_behind then " · ⚑ plan behind" else "" end) | font=Menlo size=11 color=#F0B44C"
-     else "--\(.session_count) chat\(if .session_count == 1 then "" else "s" end) · estimated from the chat | font=Menlo size=11 color=#78818F" end),
-    (.sessions[] | select(.ended | not) | "--\(if .health == "needs_you" then "⏸" elif .health == "looping" then "↻" else "·" end) \(.overall)%  \((.goal // .title // "—") | clip(46)) | font=Menlo size=11 color=#78818F")'
+     else "--\(.session_count) chat\(if .session_count == 1 then "" else "s" end)\(if talk then "" elif .source == "todos" then " · % from the todo list" else " · % is an AI estimate" end)\(if .claimed_done then " · says done, not verified" else "" end) | font=Menlo size=11 color=#78818F" end),
+    (.sessions[] | select(.ended | not) | "--\(if .health == "needs_you" then "⏸" elif .health == "looping" then "↻" else "·" end) \(if talk then "  —" else "\(.overall)% \(src)" end)  \(if .scope_changed then "↗ " else "" end)\((.goal // .title // "—") | clip(46)) | font=Menlo size=11 color=#78818F")'
 echo "---"
 printf '%s' "$json" | jq -r '.totals | "\(.live) live · \(if .cost_estimated then "≈" else "" end)$\(.cost_today * 100 | round / 100) today | font=Menlo size=11 color=#78818F"'
 echo "open dashboard | href=$URL"
