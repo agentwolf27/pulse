@@ -56,7 +56,7 @@ if [ -z "$sid" ] || [ ! -f "$state" ]; then
 fi
 
 # --- one read of the state file --------------------------------------------
-IFS=$'\x1f' read -r overall source goal now hstate hdetail done total ip edits commits tests_pass mode phases scope subagents ctx_est behind wkind wat stale tp < <(jq -r '
+IFS=$'\x1f' read -r overall source goal now hstate hdetail done total ip edits commits tests_pass mode phases scope subagents ctx_est behind wkind wat stale tp claimed < <(jq -r '
   def clip(n): gsub("[\t\n\r]+"; " ") | if length > n then .[0:n-1] + "…" else . end;
   [ (.overall // 0),
     (.source // "heuristic"),
@@ -79,7 +79,8 @@ IFS=$'\x1f' read -r overall source goal now hstate hdetail done total ip edits c
     # the goal card predates the latest reply by 3+ minutes: say how old it is
     ((.analyzed_at // "" | try fromdateiso8601 catch 0) as $a | (.stopped_at // "" | try fromdateiso8601 catch 0) as $s
      | if (.ended | not) and $a > 0 and $s - $a > 180 then ((now - $a) / 60 | floor | if . < 1 then 1 else . end) else "" end),
-    (.transcript_path // "")
+    (.transcript_path // ""),
+    (if .claimed_done then "1" else "0" end)
   ] | map(tostring) | join("")' "$state" 2>/dev/null)
 [ -z "${overall:-}" ] && overall=0
 
@@ -117,15 +118,23 @@ case "$hstate" in
   *)         badge="${ACC}⚡${R}" ;;
 esac
 
-# --- line 1: badge · % · bar · goal · right cluster -------------------------
+# --- line 1: badge · % · source · bar · goal · right cluster ----------------
+# every % says where it comes from: the plan's ticks, Claude's todos, or the AI's estimate
+case "$source" in
+  plan)  srcl="plan" ;;
+  todos) srcl="todos" ;;
+  llm)   srcl="AI est" ;;
+  *)     srcl="rough" ;;
+esac
+gmark=""; [ "$scope" = "1" ] && gmark="${ACC}↗${R} "   # the goal changed with the chat
 if [ "$mode" = "explore" ] || [ "$mode" = "conversation" ]; then
   # nothing is being built yet — a percentage would be a lie
   [ "$mode" = "explore" ] && lbl="exploring" || lbl="chatting"
-  printf '%s %s%s%s %s  %s   %s\n' "$badge" "$MUTE" "$lbl" "$R" "$bar" "$goal" "$right"
+  printf '%s %s%s%s %s  %s%s   %s\n' "$badge" "$MUTE" "$lbl" "$R" "$bar" "$gmark" "$goal" "$right"
 else
-  printf '%s %s%3d%%%s %s  %s   %s\n' "$badge" "$B" "$overall" "$R" "$bar" "$goal" "$right"
+  printf '%s %s%3d%%%s %s %s%s%s  %s%s   %s\n' "$badge" "$B" "$overall" "$R" "$bar" "$MUTE" "$srcl" "$R" "$gmark" "$goal" "$right"
 fi
-[ "$scope" = "1" ] && now="↗ scope grew · $now"
+[ "${claimed:-0}" = "1" ] && now="${WARN}says done · not verified${R}${now:+ · $now}"
 [ "${behind:-0}" = "1" ] && now="${WARN}⚑ plan behind${R} · $now"
 [ -n "${stale:-}" ] && now="${MUTE}◷ card ${stale}m old${R}${now:+ · $now}"
 

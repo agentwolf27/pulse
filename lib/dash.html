@@ -104,6 +104,9 @@
   .blockers div { display: flex; gap: 8px; }
   .blockers .k { flex: none; }
   .meta .stale { color: var(--mute); border: 1px dashed var(--line-soft); border-radius: 4px; padding: 0 4px; }
+  .src { color: var(--mute); border: 1px solid var(--line-soft); border-radius: 4px; padding: 0 4px; }
+  .said { color: var(--warn); background: none; border: 1px dashed var(--warn); border-radius: 4px; padding: 0 4px; }
+  .chg { color: var(--accent); }
   .ai-banner { display: flex; flex-wrap: wrap; gap: 4px 12px; align-items: baseline; margin: 0 0 12px; padding: 10px 14px;
                border: 1px solid var(--warn); border-radius: 8px; color: var(--warn); font-size: 13px; }
   .ai-banner b { font-weight: 600; }
@@ -177,6 +180,13 @@
   let data = null, lastOk = 0, failing = false;
   const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
   const money = (v, est) => (est ? '≈' : '') + '$' + (Number(v) || 0).toFixed(2);
+  // every % says where it comes from; talk-only chats show none
+  const SRC = { plan: 'plan', todos: 'todos', llm: 'AI estimate', heuristic: 'rough count' };
+  const srcLabel = x => SRC[x] || 'AI estimate';
+  const talkOnly = x => x.mode === 'explore' || x.mode === 'conversation';
+  const SAID = '<mark class="said" title="Claude said the work is complete, but no test run or commit backs it up yet">says done · not verified</mark>';
+  const goalMark = s => s.scope_changed
+    ? `<span class="chg" title="the goal changed${(s.goal_history || []).length ? ' — was: ' + esc(s.goal_history[s.goal_history.length - 1].goal) : ''}">↗</span> ` : '';
   const ago = s => { s = Math.max(0, Math.round(s)); if (s < 60) return 'now'; if (s < 3600) return Math.floor(s / 60) + 'm'; if (s < 86400) return Math.floor(s / 3600) + 'h'; return Math.floor(s / 86400) + 'd'; };
   const clip = (s, n) => { s = String(s || ''); return s.length > n ? s.slice(0, n - 1) + '…' : s; };
 
@@ -207,14 +217,16 @@
     if (p.subagents) badges.push(`<span class="bi">⚙${p.subagents}</span>`);
     if (p.plan_behind) badges.push(`<span class="b" title="the chat's estimate is well ahead of what the plan has ticked">⚑</span>`);
     if (p.stale) badges.push(`<span class="stale" title="the goal card predates the latest reply — the analyser has not caught up">◷ card ${p.stale_min}m old</span>`);
-    const noPct = p.mode === 'explore' || p.mode === 'conversation';
+    const noPct = talkOnly(p);
+    if (p.claimed_done) badges.unshift(SAID);
+    if (!noPct) badges.unshift(`<span class="src" title="where this % comes from">${srcLabel(p.source)}</span>`);
 
     const sessions = p.sessions.filter(s => showAll || !s.ended).map(s => `
       <div class="s">
         <span class="dot ${esc(s.health)}"></span>
-        <span class="pct ${s.mode === 'explore' || s.mode === 'conversation' ? 'dim' : ''} num">${s.mode === 'explore' || s.mode === 'conversation' ? '—' : s.overall + '%'}</span>
-        <span class="t" title="${esc(s.title || '')}">${esc(clip(s.goal || s.title || '—', 60))}</span>
-        <span class="m">${s.health === 'needs_you' && s.health_detail ? '⏸ ' + esc(clip(s.health_detail, 40)) + ' · ' : s.now ? esc(clip(s.now, 34)) + ' · ' : ''}${money(s.cost, s.cost_estimated)}${s.ended ? ' · ended' : ' · ' + ago(s.idle_s)}</span>
+        <span class="pct ${talkOnly(s) ? 'dim' : ''} num">${talkOnly(s) ? '—' : s.overall + '%'}</span>
+        <span class="t" title="${esc(s.title || '')}">${goalMark(s)}${esc(clip(s.goal || s.title || '—', 60))}</span>
+        <span class="m">${talkOnly(s) ? '' : srcLabel(s.source) + ' · '}${s.claimed_done ? SAID + ' · ' : ''}${s.health === 'needs_you' && s.health_detail ? '⏸ ' + esc(clip(s.health_detail, 40)) + ' · ' : s.now ? esc(clip(s.now, 34)) + ' · ' : ''}${money(s.cost, s.cost_estimated)}${s.ended ? ' · ended' : ' · ' + ago(s.idle_s)}</span>
       </div>`).join('');
 
     return `
