@@ -85,7 +85,7 @@ and how far along it is — in the statusline, the menu bar, and one dashboard.
 - [x] 6 · At least 10% fewer analyser calls on this machine's own chats (replayed locally, totals only), with the median update lag no worse than today's — `node lib/eval.js --suite cost --real`
 - [x] 6 · The dashboard shows the analyser's own spend apart from the chats' spend — `grep -q 'data-ai-spend' lib/dash.html`
 - [ ] Decide whether the API path moves from Haiku 4.5 to Haiku 5.5, once the replay shows how they compare
-- [ ] Bring the installed copy in line with this repo before building: six files differ in wording, the analyser files match
+- [x] The installed copy matches this repo (PLAN.md and dev-only files aside) — `diff -rq --exclude=.git --exclude=.claude --exclude=graphify-out --exclude=CLAUDE.md --exclude='.graphify*' --exclude=PLAN.md . ~/.claude/pulse/bin/..`
 
 ## Still open
 
